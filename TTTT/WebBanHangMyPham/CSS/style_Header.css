@@ -1,0 +1,19 @@
+.icon-search-header {
+    border: 1.5px solid #2D9596;
+    border-left: none;
+    background-color: white;
+    color: #2D9596;
+    font-size: 1.5em;
+    opacity: 0.8;
+}
+
+.search-header {
+    border: 1.5px solid #2D9596;
+    border-right: none;
+    height: 50px;
+}
+
+.color-logo {
+    color: #2D9596 !important;
+    text-decoration: none;
+}

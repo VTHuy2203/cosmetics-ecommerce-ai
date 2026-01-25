@@ -1,0 +1,17 @@
+.carousel-inner {
+    max-height: 500px; /* Đặt chiều cao tối đa cho slider */
+    overflow: hidden;
+}
+
+.carousel-inner img {
+    width: 100%; /* Đảm bảo ảnh rộng toàn bộ */
+    height: 100%; /* Chiều cao lấp đầy khung */
+    object-fit: cover; /* Cắt ảnh nếu cần để lấp đầy */
+}
+
+/* Slick Carousel Adjustments (nếu dùng Slick) */
+.slick-slide img {
+    width: 100%;
+    height: auto; /* Đảm bảo tỷ lệ khung hình gốc */
+    object-fit: cover;
+}

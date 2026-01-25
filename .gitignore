@@ -1,0 +1,38 @@
+# --- Secrets ---
+.env
+*.env
+.env.*
+config/*.env
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- ChromaDB / Vector DB ---
+chroma_cosmetics/
+chroma*/
+*.sqlite3
+*.db
+
+# --- Logs ---
+*.log
+logs/
+log/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- PHP / Composer (nếu có) ---
+vendor/
+
+# --- Uploads (tuỳ bạn, nếu chứa dữ liệu thật) ---
+uploads/

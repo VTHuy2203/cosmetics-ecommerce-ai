@@ -1,0 +1,32 @@
+/* Ẩn các nút lên xuống trong input number */
+#input-add-cart::-webkit-inner-spin-button,
+#input-add-cart::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+#input-add-cart {
+    text-align: center;
+    /* Căn giữa số */
+    width: 40px;
+    border: none;
+}
+
+.btn-detail-buy:hover{
+    opacity: 0.8;
+}
+.btn-detail-add-cart:hover{
+    opacity: 0.8;
+}
+
+.motachitiet img{
+    max-width: 100%; /* Ảnh sẽ không vượt quá chiều rộng của phần tử chứa nó */
+    height: auto;
+    overflow: auto;
+}
+
+.set-img-baiviet img{
+    max-width: 50%;
+    height: 400px;
+    overflow: auto;
+}

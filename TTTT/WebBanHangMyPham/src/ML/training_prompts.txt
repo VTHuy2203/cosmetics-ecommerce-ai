@@ -1,0 +1,114 @@
+# Training Prompts for Cosmetics Chatbot - Mơ Shop
+# Use these prompts to fine-tune or train the chatbot model
+
+## Conversation 1: Product Search - Serum
+**User:** Tôi muốn tìm serum dưỡng da
+**Bot:** Chào bạn! Cảm ơn bạn đã quan tâm đến sản phẩm serum dưỡng da của Mơ Shop. Mình có 2 sản phẩm phù hợp nhất cho bạn:
+• [Tên serum] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm nổi bật: ví dụ: Serum dưỡng ẩm sâu, làm mềm da, giảm khô ráp]
+• [Tên serum] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm nổi bật: ví dụ: Serum chống lão hóa, làm mờ nếp nhăn, cải thiện độ đàn hồi]
+Bạn có muốn biết thêm thông tin về sản phẩm nào không?
+
+## Conversation 2: Product Search - Cleanser
+**User:** Có sữa rửa mặt nào không?
+**Bot:** Xin chào! Mình có sữa rửa mặt phù hợp cho bạn:
+• [Tên sữa rửa mặt] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Làm sạch sâu, dịu nhẹ, phù hợp da nhạy cảm]
+• [Tên sữa rửa mặt] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Tẩy trang và rửa mặt 2 trong 1, tiện lợi]
+Bạn có câu hỏi gì khác không?
+
+## Conversation 3: Product Search - Sunscreen
+**User:** Tôi cần kem chống nắng
+**Bot:** Chào bạn! Kem chống nắng rất quan trọng để bảo vệ da. Mình giới thiệu 2 sản phẩm tốt nhất:
+• [Tên kem chống nắng] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: SPF cao, chống nước, không gây bóng nhờn]
+• [Tên kem chống nắng] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Dưỡng ẩm, làm mịn da, phù hợp trang điểm]
+Bạn có muốn đặt lịch tư vấn với nhân viên Mơ Shop không?
+
+## Conversation 4: Product Search - Moisturizer
+**User:** Có kem dưỡng ẩm nào tốt không?
+**Bot:** Xin chào! Cảm ơn bạn đã quan tâm. Mình có kem dưỡng ẩm chất lượng:
+• [Tên kem dưỡng ẩm] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Dưỡng ẩm 24h, làm mềm da, giảm khô ráp]
+• [Tên kem dưỡng ẩm] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Nhẹ nhàng, không gây bít tắc lỗ chân lông]
+Bạn có muốn biết thêm thông tin gì không?
+
+## Conversation 5: Product Search - Mask
+**User:** Tôi muốn mua mặt nạ
+**Bot:** Chào bạn! Mặt nạ là sản phẩm chăm sóc da tuyệt vời. Mình có:
+• [Tên mặt nạ] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Làm sạch sâu, thu nhỏ lỗ chân lông]
+• [Tên mặt nạ] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Dưỡng ẩm, làm sáng da, giảm thâm]
+Bạn có muốn đặt lịch tư vấn với nhân viên Mơ Shop không?
+
+## Conversation 6: Booking Consultation - Yes
+**User:** Có, tôi muốn đặt lịch
+**Bot:** Cảm ơn bạn! Bạn muốn đặt lịch tư vấn vào thời gian nào ạ?
+Bạn hãy chọn thời gian ở biểu mẫu dưới đây (Ngày/Tháng/Năm và Giờ/Phút) hoặc nhập theo mẫu DD/MM/YYYY HH:MM (ví dụ: 05/11/2025 14:30).
+
+## Conversation 7: Booking Consultation - No
+**User:** Không, cảm ơn
+**Bot:** Cảm ơn bạn! Nếu bạn có bất kỳ câu hỏi nào khác, đừng ngần ngại liên hệ với chúng tôi nhé!
+
+## Conversation 8: Booking Confirmation
+**User:** 15/12/2025 14:30
+**Bot:** Cảm ơn bạn rất nhiều! Mình đã ghi nhận lịch hẹn tư vấn của bạn vào 15/12/2025 14:30. Nhân viên Mơ Shop sẽ liên hệ với bạn sớm nhất có thể. Chúc bạn một ngày tốt lành!
+
+## Conversation 9: General Greeting
+**User:** Xin chào
+**Bot:** Xin chào bạn! Tôi rất vui được giúp bạn. Bạn đang tìm sản phẩm gì ạ?
+
+## Conversation 10: Product Search - Toner
+**User:** Có toner nào không?
+**Bot:** Chào bạn! Toner giúp cân bằng độ pH và làm sạch da. Mình có:
+• [Tên toner] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Cân bằng pH, làm sạch sâu, thu nhỏ lỗ chân lông]
+• [Tên toner] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Dưỡng ẩm, làm dịu da, phù hợp da nhạy cảm]
+Bạn có muốn đặt lịch tư vấn với nhân viên Mơ Shop không?
+
+## Conversation 11: Product Search - Makeup
+**User:** Có son môi nào đẹp không?
+**Bot:** Xin chào! Son môi là sản phẩm không thể thiếu. Mình có:
+• [Tên son] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Màu sắc đa dạng, lâu trôi, dưỡng môi]
+• [Tên son] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Màu tự nhiên, không khô môi, bền màu]
+Bạn có câu hỏi gì khác không?
+
+## Conversation 12: Product Search - Whitening
+**User:** Tôi muốn sản phẩm làm trắng da
+**Bot:** Chào bạn! Sản phẩm làm trắng da cần được sử dụng đúng cách. Mình có:
+• [Tên sản phẩm] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Làm sáng da, giảm thâm, an toàn cho da]
+• [Tên sản phẩm] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Dưỡng trắng, chống nắng, bảo vệ da]
+Bạn có muốn đặt lịch tư vấn với nhân viên Mơ Shop để được tư vấn cách sử dụng đúng cách không?
+
+## Conversation 13: Product Search - Acne Treatment
+**User:** Có sản phẩm trị mụn nào không?
+**Bot:** Xin chào! Trị mụn cần sản phẩm phù hợp với loại da. Mình có:
+• [Tên sản phẩm] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Kháng khuẩn, giảm viêm, làm khô mụn]
+• [Tên sản phẩm] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Làm sạch sâu, kiểm soát dầu, ngăn mụn]
+Bạn có muốn đặt lịch tư vấn với nhân viên Mơ Shop để được tư vấn phù hợp với loại da của bạn không?
+
+## Conversation 14: Product Search - Anti-aging
+**User:** Tôi cần sản phẩm chống lão hóa
+**Bot:** Chào bạn! Chống lão hóa là bước quan trọng trong chăm sóc da. Mình có:
+• [Tên sản phẩm] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Làm mờ nếp nhăn, cải thiện độ đàn hồi, trẻ hóa da]
+• [Tên sản phẩm] - [Thương hiệu] - Giá: [Giá] VND
+  [Đặc điểm: Chống oxy hóa, dưỡng ẩm sâu, bảo vệ da]
+Bạn có muốn đặt lịch tư vấn với nhân viên Mơ Shop không?
+
+## Conversation 15: Follow-up Question
+**User:** Sản phẩm này có phù hợp với da nhạy cảm không?
+**Bot:** Cảm ơn bạn đã hỏi! Sản phẩm này [thông tin về độ phù hợp với da nhạy cảm]. Tuy nhiên, để đảm bảo an toàn nhất, bạn có muốn đặt lịch tư vấn với nhân viên Mơ Shop để được tư vấn chi tiết hơn không?
+
