@@ -12,15 +12,8 @@ if (isset($skip_admin_check) && $skip_admin_check === true) {
     return;
 }
 
-if (!isset($_SESSION)) {
-    session_start();
-}
-
-// Allow localhost full admin access ONLY if no user is logged in
-$is_localhost = ($_SERVER['HTTP_HOST'] === 'localhost' || 
-                 $_SERVER['HTTP_HOST'] === '127.0.0.1' || 
-                 strpos($_SERVER['HTTP_HOST'], 'localhost:') !== false ||
-                 strpos($_SERVER['HTTP_HOST'], '127.0.0.1:') !== false);
+// config/security.php is loaded before this file and owns the shared
+// MOSHOPSESSID session. Never start PHP's default PHPSESSID here.
 
 // CRITICAL: Admin panel access is determined SOLELY by admin session variables
 // UI session (user, user_role, IDNguoiDung) should NEVER affect admin panel access
@@ -29,7 +22,30 @@ $is_localhost = ($_SERVER['HTTP_HOST'] === 'localhost' ||
 // Get ADMIN-SPECIFIC session info (separate from User UI sessions)
 $admin_role = $_SESSION['admin_role'] ?? null;
 $is_admin = isset($_SESSION['admin_is_admin']) && $_SESSION['admin_is_admin'] === true;
-$has_admin_session = isset($_SESSION['admin_user']) || isset($_SESSION['admin_id']);
+$has_admin_session = isset($_SESSION['admin_user'], $_SESSION['admin_id'], $_SESSION['admin_role']);
+
+// Re-read the role on every protected request so disabling or demoting an
+// account takes effect immediately instead of lasting until session expiry.
+if ($has_admin_session) {
+    try {
+        $accessDatabase = app_pdo();
+        $accessStatement = $accessDatabase->prepare(
+            "SELECT Role FROM khachhang WHERE ID_KhachHang = ? AND TenDangNhap = ? AND Role IN ('admin','manager','employee') LIMIT 1"
+        );
+        $accessStatement->execute([(int) $_SESSION['admin_id'], (string) $_SESSION['admin_user']]);
+        $databaseRole = (string) ($accessStatement->fetchColumn() ?: '');
+        if ($databaseRole === '' || !hash_equals((string) $admin_role, $databaseRole)) {
+            unset($_SESSION['admin_user'], $_SESSION['admin_id'], $_SESSION['admin_role'], $_SESSION['admin_is_admin']);
+            $has_admin_session = false;
+            $admin_role = null;
+        }
+    } catch (Throwable $error) {
+        error_log('Admin access role verification failed; code=' . (int) $error->getCode());
+        unset($_SESSION['admin_user'], $_SESSION['admin_id'], $_SESSION['admin_role'], $_SESSION['admin_is_admin']);
+        $has_admin_session = false;
+        $admin_role = null;
+    }
+}
 
 // CRITICAL: We completely ignore UI session variables for admin access decisions
 // UI login should NEVER affect Admin panel access
@@ -40,7 +56,17 @@ $current_page = basename($_SERVER['PHP_SELF']);
 // Define allowed pages for each role
 $shipper_allowed_pages = ['Shipper_View_Orders.php', 'Admin_Logout.php'];
 // Staff (employee role via admin login) can access their dashboard and approve orders
-$staff_allowed_pages = ['Staff_Dashboard.php', 'Manage_Users.php', 'Admin_Customer_Analysis.php', 'Admin_Guest_Customers.php', 'Approve_Oders.php', 'All_Oders.php', 'View_Oder_Detail.php', 'Admin_Logout.php'];
+$staff_allowed_pages = [
+    'Staff_Dashboard.php',
+    'Staff_Order_Management.php', 'Approve_Oders.php', 'All_Oders.php', 'View_Oder_Detail.php',
+    'Order_Status_Action.php',
+    'Staff_Canceled_Orders.php', 'Staff_Return_Refund_Requests.php', 'Staff_Return_Refund_Detail.php',
+    'Manage_Users.php', 'Customer_Detail.php', 'Admin_Customer_Analysis.php',
+    'Admin_Guest_Customers.php', 'Admin_Guest_Chat_History.php',
+    'Export_Customer_Analysis_CSV.php', 'Export_Users_CSV.php',
+    'Private_File.php', 'Admin_Logout.php',
+    'Admin_Notifications.php',
+];
 // Admin-only order management pages (not accessible to staff)
 $admin_only_order_pages = ['Prepare_Oders.php', 'Delete_Oder.php', 'Shipping_Oders.php', 'Success_Oders.php'];
 
@@ -62,33 +88,10 @@ if ($is_staff_via_admin && !in_array($current_page, $staff_allowed_pages)) {
     exit();
 }
 
-// PRIORITY 1: Allow localhost admin access - grant full access on localhost
-// This allows direct access without login when on localhost
-if ($is_localhost) {
-    // On localhost, always grant admin access if no admin session exists
-    if (!$has_admin_session) {
-        // Grant admin access for localhost
-        $_SESSION['admin_is_admin'] = true;
-        $_SESSION['admin_role'] = 'admin';
-        $_SESSION['admin_user'] = 'localhost_admin';
-        $_SESSION['admin_id'] = 0;
-    }
-    $admin_role = $_SESSION['admin_role'];
-    $is_admin = ($_SESSION['admin_role'] === 'admin' || $_SESSION['admin_role'] === 'manager');
-    $has_admin_session = true;
-}
-
-// PRIORITY 2: Check if user has valid admin session
-// Allow admin, manager, or employee (staff) roles via admin login
-// Only check this if NOT on localhost (localhost already handled above)
-if (!$is_localhost) {
-    // Must have admin session with valid role (admin, manager, or employee)
-    if (!$has_admin_session || ($admin_role !== 'admin' && $admin_role !== 'manager' && $admin_role !== 'employee')) {
-        // No valid admin session - redirect to admin login
-        $login_url = '/TTTT/AdminManage/src/View/Admin_Login.php';
-        header("Location: $login_url");
-        exit();
-    }
+// Every environment, including localhost, requires a real authenticated session.
+if (!$has_admin_session || !in_array($admin_role, ['admin', 'manager', 'employee'], true)) {
+    header('Location: /TTTT/AdminManage/src/View/Admin_Login.php');
+    exit();
 }
 
 // If we reach here, user has valid admin panel access
@@ -100,4 +103,3 @@ if ($admin_role === 'admin' || $admin_role === 'manager') {
     unset($_SESSION['admin_is_admin']);
 }
 ?>
-

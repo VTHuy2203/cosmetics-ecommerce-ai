@@ -3,8 +3,10 @@
  * Admin Return/Refund Request Detail Page
  * Shows request details with attachments and approve/reject functionality
  */
-include("../Layouts/headHTML.php");
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__, 3) . '/config/returns.php';
+require_once '../Layouts/Admin_Access_Check.php';
 
 // Check admin access
 $admin_role = $_SESSION['admin_role'] ?? null;
@@ -22,8 +24,25 @@ if ($request_id <= 0) {
     exit();
 }
 
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+    require_csrf();
+    $action = (string) ($_POST['action'] ?? '');
+    try {
+        process_return_request($conn, $request_id, $action, (int) ($_SESSION['admin_id'] ?? 0), (string) $admin_role);
+        header('Location: Admin_Return_Cancellation_Requests.php?msg=' . ($action === 'approve' ? 'approved' : 'rejected'));
+        exit();
+    } catch (DomainException $error) {
+        http_response_code(409);
+        exit('Yêu cầu đã được xử lý hoặc dữ liệu hoàn tiền không hợp lệ.');
+    } catch (Throwable $error) {
+        error_log('Admin return processing failed: ' . $error->getMessage());
+        http_response_code(500);
+        exit('Không thể xử lý yêu cầu hoàn trả.');
+    }
+}
+
 // Get request details with product quantity
-$sql_request = "SELECT r.*, d.TongTien, d.TrangThai as OrderStatus, d.NgayTao as OrderDate, k.HoVaTen as CustomerName, k.ID_KhachHang, sp.TenSanPham, sp.GiaTien as ProductPrice, dct.SoLuong as ProductQuantity
+$sql_request = "SELECT r.*, d.TongTien, d.TrangThai as OrderStatus, d.NgayTao as OrderDate, k.HoVaTen as CustomerName, k.ID_KhachHang, sp.TenSanPham, dct.DonGia as ProductPrice, dct.SoLuong as ProductQuantity, dct.ThanhTienThucTra
                 FROM return_refund_requests r
                 LEFT JOIN donhang d ON r.ID_DonHang = d.ID_DonHang
                 LEFT JOIN khachhang k ON r.ID_KhachHang = k.ID_KhachHang
@@ -39,191 +58,7 @@ if (!$result_request || mysqli_num_rows($result_request) == 0) {
 
 $request = mysqli_fetch_array($result_request);
 
-// Handle approve/reject
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = isset($_POST['action']) ? $_POST['action'] : '';
-    
-    if ($action === 'approve') {
-        // Calculate refund amount based on the specific product being returned
-        // CRITICAL: Use order detail price and quantity, NOT total order amount
-        $product_price = intval($request['ProductPrice'] ?? 0);
-        $product_quantity = intval($request['ProductQuantity'] ?? 0);
-        
-        // Double-check: If price/quantity not found, get directly from order details
-        if ($product_price <= 0 || $product_quantity <= 0) {
-            $order_id = intval($request['ID_DonHang']);
-            $product_id = intval($request['ID_SanPham']);
-            $sql_check_detail = "SELECT sp.GiaTien, dct.SoLuong 
-                                FROM donhangchitiet dct
-                                INNER JOIN sanpham sp ON dct.ID_SanPham = sp.IDSanPham
-                                WHERE dct.ID_DonHang = $order_id AND dct.ID_SanPham = $product_id
-                                LIMIT 1";
-            $result_check_detail = mysqli_query($conn, $sql_check_detail);
-            if ($result_check_detail && mysqli_num_rows($result_check_detail) > 0) {
-                $detail_row = mysqli_fetch_array($result_check_detail);
-                $product_price = intval($detail_row['GiaTien'] ?? 0);
-                $product_quantity = intval($detail_row['SoLuong'] ?? 0);
-            }
-        }
-        
-        $refund_amount = $product_price * $product_quantity;
-        
-        // CRITICAL: Verify refund amount is NOT greater than order total
-        $order_total = intval($request['TongTien'] ?? 0);
-        if ($refund_amount > $order_total) {
-            // Something is wrong - log error and use proportional calculation
-            error_log("CRITICAL: Refund amount ($refund_amount) exceeds order total ($order_total) for Order #{$order_id}, Product #{$product_id}");
-            // Use proportional refund instead
-            // Calculate what percentage this product represents of the order
-            $all_products_total = 0;
-            $sql_all_products = "SELECT SUM(sp.GiaTien * dct.SoLuong) as total 
-                                FROM donhangchitiet dct
-                                INNER JOIN sanpham sp ON dct.ID_SanPham = sp.IDSanPham
-                                WHERE dct.ID_DonHang = $order_id";
-            $result_all_products = mysqli_query($conn, $sql_all_products);
-            if ($result_all_products && mysqli_num_rows($result_all_products) > 0) {
-                $all_row = mysqli_fetch_array($result_all_products);
-                $all_products_total = intval($all_row['total'] ?? 0);
-                if ($all_products_total > 0) {
-                    $product_subtotal = $product_price * $product_quantity;
-                    $refund_amount = round(($order_total * $product_subtotal) / $all_products_total);
-                }
-            }
-        }
-        
-        if ($refund_amount <= 0) {
-            header('Location: Admin_Return_Cancellation_Requests.php?error=invalid_refund_amount');
-            exit();
-        }
-        
-        // Approve request - refund to account balance
-        mysqli_query($conn, "UPDATE return_refund_requests SET TrangThai = 'approved' WHERE ID_Request = $request_id");
-        
-        // Update order status to "Returned" (status = 4)
-        // First check if status 4 column exists, if not we'll use GhiChu to mark as returned
-        $order_id = intval($request['ID_DonHang']);
-        $current_ghi_chu = '';
-        $order_info = mysqli_fetch_array(mysqli_query($conn, "SELECT GhiChu FROM donhang WHERE ID_DonHang = $order_id"));
-        if ($order_info) {
-            $current_ghi_chu = $order_info['GhiChu'] ?? '';
-        }
-        $product_name = mysqli_real_escape_string($conn, $request['TenSanPham'] ?? '');
-        $updated_ghi_chu = $current_ghi_chu . ' | [ĐÃ HOÀN TRẢ] Sản phẩm: ' . $product_name;
-        $updated_ghi_chu_escaped = mysqli_real_escape_string($conn, $updated_ghi_chu);
-        mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu_escaped' WHERE ID_DonHang = $order_id");
-        
-        // Ensure SoDu column exists
-        $check_col = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khachhang' AND COLUMN_NAME = 'SoDu'");
-        $col_exists = false;
-        if ($check_col) {
-            $col_row = mysqli_fetch_assoc($check_col);
-            $col_exists = intval($col_row['c']) > 0;
-        }
-        if (!$col_exists) {
-            @mysqli_query($conn, "ALTER TABLE `khachhang` ADD `SoDu` BIGINT NOT NULL DEFAULT 0 AFTER `DiaChi`");
-        }
-        
-        // Refund amount to customer account (only for the specific product)
-        $customer_id = intval($request['ID_KhachHang']);
-        mysqli_query($conn, "UPDATE khachhang SET SoDu = SoDu + $refund_amount WHERE ID_KhachHang = $customer_id");
-        
-        // Send notifications to Customer and Staff
-        $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-        if (file_exists($wsPushFile)) {
-            require_once($wsPushFile);
-            if (function_exists('websocket_push')) {
-                // Notify Customer
-                websocket_push(
-                    ['user_channel'],
-                    [
-                        'type' => 'return_refund_approved',
-                        'title' => 'Yêu cầu hoàn trả đã được chấp nhận',
-                        'message' => "Yêu cầu hoàn trả đơn hàng #{$request['ID_DonHang']} của bạn đã được chấp nhận. Số tiền " . number_format($refund_amount, 0, ',', '.') . " đ đã được hoàn lại vào số dư tài khoản của bạn. Chúng tôi xin lỗi vì không đáp ứng được kỳ vọng của bạn.",
-                        'sound' => 'notification',
-                        'data' => [
-                            'request_id' => $request_id,
-                            'order_id' => $request['ID_DonHang'],
-                            'customer_id' => $customer_id,
-                            'refund_amount' => $refund_amount,
-                            'timestamp' => date('Y-m-d H:i:s')
-                        ]
-                    ]
-                );
-                
-                // Notify Staff
-                websocket_push(
-                    ['staff_channel'],
-                    [
-                        'type' => 'return_refund_approved_staff',
-                        'title' => 'Yêu cầu hoàn trả đã được Admin chấp nhận',
-                        'message' => "Admin đã chấp nhận yêu cầu hoàn trả đơn hàng #{$request['ID_DonHang']} của khách hàng {$request['CustomerName']}. Số tiền hoàn trả: " . number_format($refund_amount, 0, ',', '.') . " đ",
-                        'sound' => 'notification',
-                        'data' => [
-                            'request_id' => $request_id,
-                            'order_id' => $request['ID_DonHang'],
-                            'customer_id' => $customer_id,
-                            'customer_name' => $request['CustomerName'],
-                            'refund_amount' => $refund_amount,
-                            'timestamp' => date('Y-m-d H:i:s')
-                        ]
-                    ]
-                );
-            }
-        }
-        
-        header('Location: Admin_Return_Cancellation_Requests.php?msg=approved');
-        exit();
-        
-    } elseif ($action === 'reject') {
-        // Reject request
-        mysqli_query($conn, "UPDATE return_refund_requests SET TrangThai = 'rejected' WHERE ID_Request = $request_id");
-        
-        // Send notifications to Customer and Staff
-        $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-        if (file_exists($wsPushFile)) {
-            require_once($wsPushFile);
-            if (function_exists('websocket_push')) {
-                // Notify Customer
-                websocket_push(
-                    ['user_channel'],
-                    [
-                        'type' => 'return_refund_rejected',
-                        'title' => 'Yêu cầu hoàn trả đã bị từ chối',
-                        'message' => "Yêu cầu hoàn trả đơn hàng #{$request['ID_DonHang']} của bạn đã bị từ chối. Vui lòng liên hệ với chúng tôi nếu bạn có thắc mắc.",
-                        'sound' => 'notification',
-                        'data' => [
-                            'request_id' => $request_id,
-                            'order_id' => $request['ID_DonHang'],
-                            'customer_id' => intval($request['ID_KhachHang']),
-                            'timestamp' => date('Y-m-d H:i:s')
-                        ]
-                    ]
-                );
-                
-                // Notify Staff
-                websocket_push(
-                    ['staff_channel'],
-                    [
-                        'type' => 'return_refund_rejected_staff',
-                        'title' => 'Yêu cầu hoàn trả đã bị Admin từ chối',
-                        'message' => "Admin đã từ chối yêu cầu hoàn trả đơn hàng #{$request['ID_DonHang']} của khách hàng {$request['CustomerName']}.",
-                        'sound' => 'notification',
-                        'data' => [
-                            'request_id' => $request_id,
-                            'order_id' => $request['ID_DonHang'],
-                            'customer_id' => intval($request['ID_KhachHang']),
-                            'customer_name' => $request['CustomerName'],
-                            'timestamp' => date('Y-m-d H:i:s')
-                        ]
-                    ]
-                );
-            }
-        }
-        
-        header('Location: Admin_Return_Cancellation_Requests.php?msg=rejected');
-        exit();
-    }
-}
+include("../Layouts/headHTML.php");
 
 // Parse attachments
 $attachments = [];
@@ -288,14 +123,12 @@ $status_text = ($status == 'pending') ? 'Chờ xử lý' : (($status == 'approve
                                         </tr>
                                         <tr>
                                             <th>Số lượng:</th>
-                                            <td><?php echo $request['ProductQuantity'] ?? 0; ?></td>
+                                            <td><?php echo (int) ($request['SoLuongYeuCau'] ?? 0); ?></td>
                                         </tr>
                                         <tr>
                                             <th>Số tiền hoàn trả:</th>
                                             <td><strong class="text-danger"><?php 
-                                                $product_price = intval($request['ProductPrice'] ?? 0);
-                                                $product_quantity = intval($request['ProductQuantity'] ?? 0);
-                                                $refund_amount = $product_price * $product_quantity;
+                                                $refund_amount = return_refund_preview_amount($request);
                                                 echo number_format($refund_amount, 0, ',', '.'); ?> đ</strong></td>
                                         </tr>
                                         <tr>
@@ -364,7 +197,7 @@ $status_text = ($status == 'pending') ? 'Chờ xử lý' : (($status == 'approve
                                 <div class="card-body">
                                     <div class="row">
                                         <?php foreach ($attachments as $attachment): 
-                                            $file_path = '../../../AdminManage/src/ReturnRefundAttachments/' . $attachment['filename'];
+                                            $file_path = '../Users/Private_File.php?path=' . rawurlencode('return_refunds/' . basename($attachment['filename']));
                                         ?>
                                             <div class="col-md-4 mb-3">
                                                 <?php if ($attachment['type'] === 'image'): ?>
@@ -400,6 +233,7 @@ $status_text = ($status == 'pending') ? 'Chờ xử lý' : (($status == 'approve
                                 </div>
                                 <div class="card-body">
                                     <form method="POST" action="">
+                                        <?php echo csrf_field(); ?>
                                         <div class="alert alert-info">
                                             <i class="fas fa-info-circle me-2"></i>
                                             Nếu chấp nhận, số tiền sẽ được hoàn lại vào số dư tài khoản của khách hàng.

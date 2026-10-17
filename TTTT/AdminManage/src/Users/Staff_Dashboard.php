@@ -21,11 +21,7 @@ if (!$is_staff_via_admin && !$is_admin_or_manager) {
 
 // Use PDO for chat tables
 function pdo_connect_chat() {
-    $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-    return new PDO($dsn, "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    return app_pdo();
 }
 
 $pdo = pdo_connect_chat();
@@ -33,8 +29,8 @@ $pdo = pdo_connect_chat();
 // Get new customers (last 7 days)
 $sql_new_customers = "SELECT * FROM khachhang 
                       WHERE Role != 'admin' AND Role != 'manager'
-                      AND DATE(NgayTao) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-                      ORDER BY NgayTao DESC 
+                      AND DATE(ThoiGianTao) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+                      ORDER BY ThoiGianTao DESC
                       LIMIT 20";
 $result_new_customers = mysqli_query($conn, $sql_new_customers);
 
@@ -187,26 +183,6 @@ if (!$result_pending_orders) {
                     <div class="row mb-4">
                         <?php
                         // Get pending return/refund requests count
-                        $create_table = "CREATE TABLE IF NOT EXISTS `return_refund_requests` (
-                            `ID_Request` INT AUTO_INCREMENT PRIMARY KEY,
-                            `ID_DonHang` INT NOT NULL,
-                            `ID_KhachHang` INT NOT NULL,
-                            `ID_SanPham` INT NOT NULL,
-                            `ContactName` VARCHAR(255) NOT NULL,
-                            `ContactPhone` VARCHAR(20) NOT NULL,
-                            `ContactEmail` VARCHAR(255) NOT NULL,
-                            `ContactAddress` TEXT NOT NULL,
-                            `RefundReason` TEXT NOT NULL,
-                            `Attachments` TEXT NULL,
-                            `TrangThai` ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
-                            `ThoiGianTao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            `ThoiGianCapNhat` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                            INDEX idx_order (ID_DonHang),
-                            INDEX idx_customer (ID_KhachHang),
-                            INDEX idx_status (TrangThai)
-                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-                        mysqli_query($conn, $create_table);
-                        
                         $sql_total_return = "SELECT COUNT(*) as total FROM return_refund_requests WHERE TrangThai = 'pending'";
                         $result_total_return = mysqli_query($conn, $sql_total_return);
                         $total_return_requests = 0;
@@ -276,11 +252,14 @@ if (!$result_pending_orders) {
                                                             <td><?php echo htmlspecialchars(substr($order['DiaChi'], 0, 50)) . (strlen($order['DiaChi']) > 50 ? '...' : ''); ?></td>
                                                             <td><?php echo isset($order['NgayTao']) ? date('d/m/Y H:i', strtotime($order['NgayTao'])) : 'N/A'; ?></td>
                                                             <td class="text-center">
-                                                                <a href="../Oders/Approve_Oders.php?oder_id=<?php echo $order['ID_DonHang']; ?>&approve=approve" 
-                                                                   class="btn btn-success btn-sm" 
-                                                                   onclick="return confirm('Bạn có chắc chắn muốn duyệt đơn hàng này?')">
-                                                                    <i class="fas fa-check me-1"></i>Duyệt
-                                                                </a>
+                                                                <form method="post" action="../Oders/Approve_Oders.php" class="d-inline"
+                                                                      onsubmit="return confirm('Bạn có chắc chắn muốn duyệt đơn hàng này?')">
+                                                                    <?php echo csrf_field(); ?>
+                                                                    <input type="hidden" name="order_id" value="<?php echo (int) $order['ID_DonHang']; ?>">
+                                                                    <input type="hidden" name="action" value="approve">
+                                                                    <input type="hidden" name="return_to" value="approve">
+                                                                    <button type="submit" class="btn btn-success btn-sm"><i class="fas fa-check me-1"></i>Duyệt</button>
+                                                                </form>
                                                                 <a href="../Oders/View_Oder_Detail.php?oder_id=<?php echo $order['ID_DonHang']; ?>&view=approve" 
                                                                    class="btn btn-primary btn-sm">
                                                                     <i class="fas fa-eye me-1"></i>Chi Tiết

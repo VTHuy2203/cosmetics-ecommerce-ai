@@ -1,13 +1,18 @@
 <?php
+require_once dirname(__DIR__, 3) . '/config/security.php';
 /**
  * Admin Logout Handler
  * CRITICAL: Properly logs out admin users and clears ONLY admin-specific sessions
  * This preserves User UI sessions (user, user_role, IDNguoiDung) to maintain complete separation
  * UI login session remains unaffected when logging out from Admin panel
  */
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    header('Allow: POST');
+    http_response_code(405);
+    exit('Method Not Allowed');
 }
+
+require_csrf();
 
 // CRITICAL: Clear ONLY admin-specific session variables (preserve User UI sessions)
 // This ensures UI login session remains intact when logging out from Admin panel
@@ -19,7 +24,6 @@ unset($_SESSION['admin_role']);
 unset($_SESSION['admin_is_admin']);
 
 // Redirect to admin login
-header("Location: ../View/Admin_Login.php");
+header("Location: ../View/Admin_Login.php", true, 303);
 exit();
-?>
 

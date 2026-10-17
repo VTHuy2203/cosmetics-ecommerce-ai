@@ -1,9 +1,10 @@
 <?php
 // Admin_Bookings.php - View consultation bookings
-session_start();
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__, 3) . '/AdminManage/src/Layouts/Admin_Access_Check.php';
 
 // Simple admin check - you should enhance this with proper authentication
-$is_admin = isset($_SESSION['is_admin']) && $_SESSION['is_admin'] === true;
+$is_admin = in_array((string)($_SESSION['admin_role']??''), ['admin','manager'], true);
 
 if (!$is_admin) {
     // Redirect to login or show error
@@ -11,23 +12,8 @@ if (!$is_admin) {
     exit;
 }
 
-$DEFAULTS = [
-    "DB_HOST" => "127.0.0.1",
-    "DB_NAME" => "webmipham1",
-    "DB_USER" => "root",
-    "DB_PASS" => "",
-    "DB_CHARSET" => "utf8mb4",
-];
-
-function pdo_connect($cfg) {
-    $dsn = "mysql:host={$cfg['DB_HOST']};dbname={$cfg['DB_NAME']};charset={$cfg['DB_CHARSET']}";
-    return new PDO($dsn, $cfg['DB_USER'], $cfg['DB_PASS'], [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
-}
-
-$pdo = pdo_connect($DEFAULTS);
+require_once dirname(__DIR__, 3) . '/config/bootstrap.php';
+$pdo = app_pdo();
 
 // Get bookings
 $stmt = $pdo->query("

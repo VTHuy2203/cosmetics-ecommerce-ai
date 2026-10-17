@@ -7,19 +7,16 @@
 include("../Layouts/headHTML.php");
 include("../DB_Connect.php");
 
-// Create PDO connection
 try {
-    $pdo = new PDO("mysql:host=localhost;dbname=webmipham1;charset=utf8mb4", "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    $pdo = app_pdo();
 } catch (PDOException $e) {
-    die("Database connection failed: " . $e->getMessage());
+    error_log('Admin guest history database error: ' . $e->getMessage());
+    die('Database connection failed.');
 }
 
 $session_id = $_GET['session_id'] ?? '';
 
-if (!$session_id) {
+if (!is_string($session_id) || !preg_match('/^[A-Za-z0-9_-]{1,128}$/', $session_id)) {
     header('Location: Admin_Guest_Customers.php');
     exit();
 }
@@ -60,8 +57,14 @@ $messages_stmt = $pdo->prepare("SELECT id, message, direction, created_at
 $messages_stmt->execute([$session_id]);
 $messages = $messages_stmt->fetchAll();
 
-// Get customer analysis
-$analysis_stmt = $pdo->prepare("SELECT * FROM customer_analysis WHERE session_id = ? AND user_id IS NULL LIMIT 1");
+// Get analysis details and the canonical current score.
+$analysis_stmt = $pdo->prepare("SELECT ca.*,
+                                       COALESCE(sc.segment, ca.label, 'normal') AS current_label,
+                                       COALESCE(sc.intent_score, ca.lead_score, 0) AS intent_score,
+                                       COALESCE(sc.spam_risk_score, ca.spam_risk_score, 0) AS current_spam_risk
+                                FROM customer_analysis ca
+                                LEFT JOIN customer_scores_current sc ON sc.subject_key = CONCAT('session:', ca.session_id)
+                                WHERE ca.session_id = ? AND ca.user_id IS NULL LIMIT 1");
 $analysis_stmt->execute([$session_id]);
 $analysis = $analysis_stmt->fetch();
 
@@ -97,10 +100,11 @@ $appointments = $appointments_stmt->fetchAll();
                   <?php if ($analysis): ?>
                     <p><strong>Nhãn:</strong> 
                       <span class="badge badge-<?php 
-                        echo $analysis['label'] === 'spam' ? 'danger' : 
-                            ($analysis['label'] === 'follow-up' ? 'warning' : 'success'); 
+                        $currentLabel = $analysis['current_label'] ?? 'normal';
+                        echo $currentLabel === 'spam' ? 'danger' :
+                            ($currentLabel === 'follow-up' ? 'warning' : ($currentLabel === 'potential' ? 'success' : 'secondary'));
                       ?>">
-                        <?php echo ucfirst($analysis['label']); ?>
+                        <?php echo htmlspecialchars($analysis['current_label'] ?? 'normal'); ?> · <?php echo (int) ($analysis['intent_score'] ?? 0); ?> điểm
                       </span>
                     </p>
                     <p><strong>Số tin nhắn:</strong> <?php echo $analysis['message_count']; ?></p>
@@ -196,6 +200,19 @@ $appointments = $appointments_stmt->fetchAll();
   </div>
   
   <?php include("../Layouts/Link.php"); ?>
+  <script>
+    // Live conversation: reload when this guest sends a message or books a consultation.
+    (function () {
+      var sessionId = <?php echo json_encode($session_id); ?>;
+      var timer = null;
+      window.addEventListener('moshop:realtime-notification', function (event) {
+        var data = (event.detail || {}).data || {};
+        if (data.session_id !== sessionId) return;
+        clearTimeout(timer);
+        timer = setTimeout(function () { location.reload(); }, 2500);
+      });
+    })();
+  </script>
 </body>
 </html>
 

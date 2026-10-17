@@ -1,108 +1,70 @@
 <?php
-/**
- * Customer Notifications API
- * 
- * Endpoints:
- * - GET: Fetch notifications for a user
- * - POST: Mark notification as read
- */
+declare(strict_types=1);
 
-header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+require_once __DIR__ . '/../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit;
+$userId = (int) ($_SESSION['IDNguoiDung'] ?? 0);
+if ($userId < 1) {
+    json_response(['ok' => false, 'error' => 'unauthenticated'], 401);
 }
 
-$DEFAULTS = [
-    "DB_HOST"    => "127.0.0.1",
-    "DB_NAME"    => "webmipham1",
-    "DB_USER"    => "root",
-    "DB_PASS"    => "",
-    "DB_CHARSET" => "utf8mb4",
-];
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+if ($method === 'GET') {
+    $unreadOnly = ($_GET['unread_only'] ?? '') === '1';
+    $sql = 'SELECT id, type, title, message, is_read, created_at
+            FROM customer_notifications WHERE user_id = ?';
+    if ($unreadOnly) {
+        $sql .= ' AND is_read = 0';
+    }
+    $sql .= ' ORDER BY created_at DESC LIMIT 50';
+    $statement = $conn->prepare($sql);
+    $statement->bind_param('i', $userId);
+    $statement->execute();
+    $notifications = $statement->get_result()->fetch_all(MYSQLI_ASSOC);
 
-function pdo_connect($cfg) {
-    $dsn = "mysql:host={$cfg['DB_HOST']};dbname={$cfg['DB_NAME']};charset={$cfg['DB_CHARSET']}";
-    return new PDO($dsn, $cfg['DB_USER'], $cfg['DB_PASS'], [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
+    $count = $conn->prepare('SELECT COUNT(*) AS count FROM customer_notifications WHERE user_id = ? AND is_read = 0');
+    $count->bind_param('i', $userId);
+    $count->execute();
+    $unreadCount = (int) $count->get_result()->fetch_assoc()['count'];
+
+    $status = $conn->prepare(
+        'SELECT customer_label, customer_value_tier, total_weekly_purchase FROM khachhang WHERE ID_KhachHang = ?'
+    );
+    $status->bind_param('i', $userId);
+    $status->execute();
+
+    json_response([
+        'ok' => true,
+        'notifications' => $notifications,
+        'unread_count' => $unreadCount,
+        'customer_status' => $status->get_result()->fetch_assoc() ?: null,
     ]);
 }
 
-try {
-    $pdo = pdo_connect($DEFAULTS);
-    $method = $_SERVER['REQUEST_METHOD'];
+if ($method !== 'POST') {
+    json_response(['ok' => false, 'error' => 'method_not_allowed'], 405);
+}
+require_csrf(true);
 
-    if ($method === 'GET') {
-        // Get notifications for user
-        $userId = isset($_GET['user_id']) ? (int)$_GET['user_id'] : 0;
-        $unreadOnly = isset($_GET['unread_only']) && $_GET['unread_only'] === '1';
-        
-        if ($userId <= 0) {
-            echo json_encode(["ok" => false, "error" => "Invalid user_id"]);
-            exit;
-        }
-
-        $sql = "SELECT id, type, title, message, is_read, created_at 
-                FROM customer_notifications 
-                WHERE user_id = ?";
-        if ($unreadOnly) {
-            $sql .= " AND is_read = 0";
-        }
-        $sql .= " ORDER BY created_at DESC LIMIT 50";
-
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([$userId]);
-        $notifications = $stmt->fetchAll();
-
-        // Get unread count
-        $countStmt = $pdo->prepare("SELECT COUNT(*) as count FROM customer_notifications 
-                                    WHERE user_id = ? AND is_read = 0");
-        $countStmt->execute([$userId]);
-        $unreadCount = (int)$countStmt->fetch()['count'];
-
-        // Get customer status info
-        $statusStmt = $pdo->prepare("SELECT customer_label, discount_percent, total_weekly_purchase 
-                                     FROM khachhang WHERE ID_KhachHang = ?");
-        $statusStmt->execute([$userId]);
-        $status = $statusStmt->fetch();
-
-        echo json_encode([
-            "ok" => true,
-            "notifications" => $notifications,
-            "unread_count" => $unreadCount,
-            "customer_status" => $status ?: null
-        ], JSON_UNESCAPED_UNICODE);
-
-    } elseif ($method === 'POST') {
-        // Mark notification as read
-        $input = json_decode(file_get_contents('php://input'), true);
-        $notificationId = isset($input['notification_id']) ? (int)$input['notification_id'] : 0;
-        $markAllRead = isset($input['mark_all_read']) && $input['mark_all_read'];
-        $userId = isset($input['user_id']) ? (int)$input['user_id'] : 0;
-
-        if ($markAllRead && $userId > 0) {
-            // Mark all as read for user
-            $stmt = $pdo->prepare("UPDATE customer_notifications SET is_read = 1 WHERE user_id = ?");
-            $stmt->execute([$userId]);
-            echo json_encode(["ok" => true, "marked" => $stmt->rowCount()]);
-        } elseif ($notificationId > 0) {
-            // Mark single notification as read
-            $stmt = $pdo->prepare("UPDATE customer_notifications SET is_read = 1 WHERE id = ?");
-            $stmt->execute([$notificationId]);
-            echo json_encode(["ok" => true, "marked" => $stmt->rowCount()]);
-        } else {
-            echo json_encode(["ok" => false, "error" => "Invalid parameters"]);
-        }
-    } else {
-        echo json_encode(["ok" => false, "error" => "Method not allowed"]);
-    }
-
-} catch (Exception $e) {
-    echo json_encode(["ok" => false, "error" => $e->getMessage()]);
+$raw = file_get_contents('php://input');
+$input = is_string($raw) && strlen($raw) <= 4096 ? json_decode($raw, true) : null;
+if (!is_array($input)) {
+    json_response(['ok' => false, 'error' => 'invalid_json'], 400);
 }
 
+if (($input['mark_all_read'] ?? false) === true) {
+    $statement = $conn->prepare('UPDATE customer_notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0');
+    $statement->bind_param('i', $userId);
+} else {
+    $notificationId = (int) ($input['notification_id'] ?? 0);
+    if ($notificationId < 1) {
+        json_response(['ok' => false, 'error' => 'invalid_notification'], 422);
+    }
+    $statement = $conn->prepare(
+        'UPDATE customer_notifications SET is_read = 1 WHERE id = ? AND user_id = ? AND is_read = 0'
+    );
+    $statement->bind_param('ii', $notificationId, $userId);
+}
+$statement->execute();
+json_response(['ok' => true, 'marked' => $statement->affected_rows]);

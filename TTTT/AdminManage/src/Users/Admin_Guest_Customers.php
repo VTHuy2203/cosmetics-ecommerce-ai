@@ -7,39 +7,18 @@
 include("../Layouts/headHTML.php");
 include("../DB_Connect.php");
 
-// Create PDO connection
 try {
-    $pdo = new PDO("mysql:host=localhost;dbname=webmipham1;charset=utf8mb4", "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    $pdo = app_pdo();
 } catch (PDOException $e) {
-    die("Database connection failed: " . $e->getMessage());
-}
-
-// Ensure guest_customers table exists
-try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS guest_customers (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        session_id VARCHAR(128) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        phone VARCHAR(20) NOT NULL,
-        address TEXT NULL,
-        email VARCHAR(255) NULL,
-        notes TEXT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX idx_session_id (session_id),
-        INDEX idx_phone (phone)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-} catch (Exception $e) {
-    error_log("Admin_Guest_Customers.php: Schema error: " . $e->getMessage());
+    error_log('Admin guest database error: ' . $e->getMessage());
+    die('Database connection failed.');
 }
 
 // Get filter
-$filter = $_GET['filter'] ?? 'all';
-$search = $_GET['search'] ?? '';
-$session_id = $_GET['session_id'] ?? '';
+$filter = in_array($_GET['filter'] ?? 'all', ['all', 'normal', 'spam', 'follow-up', 'potential'], true) ? ($_GET['filter'] ?? 'all') : 'all';
+$search = trim((string) ($_GET['search'] ?? ''));
+$session_id = trim((string) ($_GET['session_id'] ?? ''));
+$h = static fn($value): string => htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 
 // Build query
 $where = [];
@@ -58,6 +37,11 @@ if ($session_id) {
     $where[] = "gc.session_id = ?";
     $params[] = $session_id;
 }
+if ($filter !== 'all') {
+    // segment and label are ENUMs with different collations: compare them as one explicit collation.
+    $where[] = "CONVERT(COALESCE(sc.segment, ca.label, 'normal') USING utf8mb4) COLLATE utf8mb4_unicode_ci = ?";
+    $params[] = $filter;
+}
 
 $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
 
@@ -72,17 +56,19 @@ $sql = "SELECT
     gc.notes,
     gc.created_at,
     gc.updated_at,
-    ca.label,
+    COALESCE(sc.segment, ca.label, 'normal') AS label,
+    COALESCE(sc.intent_score, ca.lead_score, 0) AS intent_score,
     ca.message_count,
     ca.has_appointment,
     COUNT(DISTINCT cm.id) as total_messages,
     COUNT(DISTINCT appt.id) as total_appointments
 FROM guest_customers gc
 LEFT JOIN customer_analysis ca ON gc.session_id = ca.session_id AND ca.user_id IS NULL
+LEFT JOIN customer_scores_current sc ON sc.subject_key = CONCAT('session:', gc.session_id)
 LEFT JOIN chat_messages cm ON gc.session_id = cm.session_id AND cm.user_id IS NULL
 LEFT JOIN chat_appointments appt ON gc.session_id = appt.session_id AND appt.user_id IS NULL
 {$whereClause}
-GROUP BY gc.id, gc.session_id, gc.name, gc.phone, gc.address, gc.email, gc.notes, gc.created_at, gc.updated_at, ca.label, ca.message_count, ca.has_appointment
+GROUP BY gc.id,gc.session_id,gc.name,gc.phone,gc.address,gc.email,gc.notes,gc.created_at,gc.updated_at,sc.segment,sc.intent_score,ca.label,ca.lead_score,ca.message_count,ca.has_appointment
 ORDER BY gc.updated_at DESC
 LIMIT 100";
 
@@ -93,14 +79,17 @@ $guests = $stmt->fetchAll();
 // Get statistics
 $stats = $pdo->query("
     SELECT 
-        COALESCE(ca.label, 'unlabeled') as label,
+        COALESCE(sc.segment, ca.label, 'normal') as label,
         COUNT(DISTINCT gc.id) as count
     FROM guest_customers gc
     LEFT JOIN customer_analysis ca ON gc.session_id = ca.session_id AND ca.user_id IS NULL
-    GROUP BY ca.label
+    LEFT JOIN customer_scores_current sc ON sc.subject_key = CONCAT('session:', gc.session_id)
+    GROUP BY COALESCE(sc.segment, ca.label, 'normal')
 ")->fetchAll(PDO::FETCH_KEY_PAIR);
 
-$stats['all'] = count($guests);
+// Real totals, not the size of the 100-row page.
+$stats['all'] = (int) $pdo->query("SELECT COUNT(*) FROM guest_customers")->fetchColumn();
+$with_contact = (int) $pdo->query("SELECT COUNT(*) FROM guest_customers WHERE phone <> ''")->fetchColumn();
 ?>
 
 <body id="page-top">
@@ -120,7 +109,8 @@ $stats['all'] = count($guests);
                   <div class="row no-gutters align-items-center">
                     <div class="col mr-2">
                       <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">Tổng khách vãng lai</div>
-                      <div class="h5 mb-0 font-weight-bold text-gray-800"><?php echo $stats['all'] ?? 0; ?></div>
+                      <div class="h5 mb-0 font-weight-bold text-gray-800"><?php echo (int) ($stats['all'] ?? 0); ?></div>
+                      <small class="text-muted"><?php echo $with_contact; ?> khách đã để lại SĐT</small>
                     </div>
                   </div>
                 </div>
@@ -171,11 +161,19 @@ $stats['all'] = count($guests);
             </div>
             <div class="card-body">
               <form method="GET" class="row g-3">
-                <div class="col-md-6">
-                  <label class="form-label">Tìm kiếm:</label>
-                  <input type="text" name="search" class="form-control" placeholder="Tên, SĐT, địa chỉ, email..." value="<?php echo htmlspecialchars($search); ?>">
+                <div class="col-md-3">
+                  <label class="form-label">Nhãn:</label>
+                  <select name="filter" class="form-control">
+                    <?php foreach (['all' => 'Tất cả', 'potential' => 'Tiềm năng', 'follow-up' => 'Đang theo dõi', 'normal' => 'Bình thường', 'spam' => 'Spam'] as $value => $text): ?>
+                      <option value="<?php echo $value; ?>" <?php echo $filter === $value ? 'selected' : ''; ?>><?php echo $text; ?></option>
+                    <?php endforeach; ?>
+                  </select>
                 </div>
                 <div class="col-md-6">
+                  <label class="form-label">Tìm kiếm:</label>
+                  <input type="text" name="search" class="form-control" placeholder="Tên, SĐT, địa chỉ, email..." value="<?php echo $h($search); ?>">
+                </div>
+                <div class="col-md-3">
                   <label class="form-label">&nbsp;</label>
                   <button type="submit" class="btn btn-primary form-control">Lọc</button>
                 </div>
@@ -210,47 +208,50 @@ $stats['all'] = count($guests);
                     <?php else: ?>
                       <?php foreach ($guests as $guest): ?>
                         <tr>
-                          <td><?php echo $guest['id']; ?></td>
+                          <td><?php echo (int) $guest['id']; ?></td>
                           <td>
-                            <strong><?php echo htmlspecialchars($guest['name']); ?></strong><br>
-                            <small class="text-muted">SĐT: <?php echo htmlspecialchars($guest['phone']); ?></small><br>
+                            <strong><?php echo $h($guest['name']); ?></strong><br>
+                            <small class="text-muted">SĐT: <?php echo $guest['phone'] !== '' ? $h($guest['phone']) : 'chưa để lại'; ?></small><br>
                             <?php if ($guest['email']): ?>
-                              <small class="text-muted">Email: <?php echo htmlspecialchars($guest['email']); ?></small><br>
+                              <small class="text-muted">Email: <?php echo $h($guest['email']); ?></small><br>
                             <?php endif; ?>
                             <?php if ($guest['address']): ?>
-                              <small class="text-muted">Địa chỉ: <?php echo htmlspecialchars(substr($guest['address'], 0, 100)); ?><?php echo strlen($guest['address']) > 100 ? '...' : ''; ?></small><br>
+                              <small class="text-muted">Địa chỉ: <?php echo $h(mb_strimwidth((string) $guest['address'], 0, 100, '...', 'UTF-8')); ?></small><br>
                             <?php endif; ?>
-                            <small class="text-muted">Session: <?php echo substr($guest['session_id'], 0, 20); ?>...</small>
+                            <small class="text-muted">Session: <?php echo $h(substr((string) $guest['session_id'], 0, 20)); ?>...</small>
                           </td>
                           <td>
                             <?php
                             $labelColors = [
+                              'normal' => 'secondary',
                               'spam' => 'danger',
                               'follow-up' => 'warning',
                               'potential' => 'success'
                             ];
                             $labelNames = [
+                              'normal' => 'Bình thường',
                               'spam' => 'Spam',
-                              'follow-up' => 'Follow-up',
-                              'potential' => 'Potential'
+                              'follow-up' => 'Đang theo dõi',
+                              'potential' => 'Tiềm năng'
                             ];
                             $label = $guest['label'] ?? 'unlabeled';
                             $color = $labelColors[$label] ?? 'secondary';
                             $name = $labelNames[$label] ?? ucfirst($label);
                             ?>
-                            <span class="badge badge-<?php echo $color; ?>"><?php echo $name; ?></span>
+                            <span class="badge badge-<?php echo $color; ?>"><?php echo $h($name); ?></span>
+                            <br><small class="text-muted"><?php echo (int) ($guest['intent_score'] ?? 0); ?>/100</small>
                           </td>
-                          <td><?php echo $guest['total_messages'] ?? 0; ?></td>
+                          <td><?php echo (int) ($guest['total_messages'] ?? 0); ?></td>
                           <td>
-                            <?php if ($guest['has_appointment']): ?>
-                              <span class="badge badge-success">Có (<?php echo $guest['total_appointments'] ?? 0; ?>)</span>
+                            <?php if ($guest['has_appointment'] || (int) ($guest['total_appointments'] ?? 0) > 0): ?>
+                              <span class="badge badge-success">Có (<?php echo (int) ($guest['total_appointments'] ?? 0); ?>)</span>
                             <?php else: ?>
                               <span class="badge badge-secondary">Không</span>
                             <?php endif; ?>
                           </td>
-                          <td><small><?php echo date('d/m/Y H:i', strtotime($guest['created_at'])); ?></small></td>
+                          <td><small><?php echo $h(date('d/m/Y H:i', strtotime((string) $guest['created_at']))); ?></small></td>
                           <td>
-                            <a href="Admin_Guest_Chat_History.php?session_id=<?php echo urlencode($guest['session_id']); ?>" class="btn btn-sm btn-info">Xem chat</a>
+                            <a href="Admin_Guest_Chat_History.php?session_id=<?php echo $h(urlencode((string) $guest['session_id'])); ?>" class="btn btn-sm btn-info">Xem chat</a>
                           </td>
                         </tr>
                       <?php endforeach; ?>
@@ -266,6 +267,20 @@ $stats['all'] = count($guests);
   </div>
   
   <?php include("../Layouts/Link.php"); ?>
+  <script>
+    // Refresh the list when a guest chats or books, so staff see new contacts without F5.
+    (function () {
+      var timer = null;
+      window.addEventListener('moshop:realtime-notification', function (event) {
+        var message = event.detail || {};
+        var data = message.data || {};
+        var relevant = (message.type === 'chat_message' && data.is_guest) || (message.type === 'new_appointment' && data.is_guest);
+        if (!relevant) return;
+        clearTimeout(timer);
+        timer = setTimeout(function () { location.reload(); }, 1500);
+      });
+    })();
+  </script>
 </body>
 </html>
 

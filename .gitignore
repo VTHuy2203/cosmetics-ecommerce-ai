@@ -10,7 +10,8 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
-venv/
+venv/*
+!venv/.htaccess
 env/
 *.egg-info/
 .pytest_cache/
@@ -24,8 +25,10 @@ chroma*/
 
 # --- Logs ---
 *.log
-logs/
+logs/*
+!logs/.htaccess
 log/
+.runtime/
 
 # --- OS ---
 .DS_Store
@@ -36,3 +39,23 @@ vendor/
 
 # --- Uploads (tuỳ bạn, nếu chứa dữ liệu thật) ---
 uploads/
+storage/private/
+Image_upload/*
+!TTTT/Image_upload/.htaccess
+!TTTT/WebBanHangMyPham/Image_upload/.htaccess
+ReturnRefundAttachments/
+!TTTT/AdminManage/src/ReturnRefundAttachments/
+TTTT/AdminManage/src/ReturnRefundAttachments/*
+!TTTT/AdminManage/src/ReturnRefundAttachments/.htaccess
+message_queue.json
+*.sql.gz
+/webmipham1.sql
+/Vietnamese-Administrative-Units-Dataset.sql
+/TTTT/sanpham.csv
+
+.zencoder/
+
+# --- Local tooling / user uploads ---
+.codex-temp/
+TTTT/Image_upload/admin-avatars/*
+TTTT/WebBanHangMyPham/Image_upload/avatars/*

@@ -5,6 +5,7 @@
  */
 include("../Layouts/headHTML.php");
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/returns.php';
 
 // Check staff access
 $admin_role = $_SESSION['admin_role'] ?? null;
@@ -16,29 +17,9 @@ if (!$is_staff_via_admin && !$is_admin_or_manager) {
     exit();
 }
 
-// Ensure table exists
-$create_table = "CREATE TABLE IF NOT EXISTS `return_refund_requests` (
-    `ID_Request` INT AUTO_INCREMENT PRIMARY KEY,
-    `ID_DonHang` INT NOT NULL,
-    `ID_KhachHang` INT NOT NULL,
-    `ID_SanPham` INT NOT NULL,
-    `ContactName` VARCHAR(255) NOT NULL,
-    `ContactPhone` VARCHAR(20) NOT NULL,
-    `ContactEmail` VARCHAR(255) NOT NULL,
-    `ContactAddress` TEXT NOT NULL,
-    `RefundReason` TEXT NOT NULL,
-    `Attachments` TEXT NULL,
-    `TrangThai` ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
-    `ThoiGianTao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    `ThoiGianCapNhat` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_order (ID_DonHang),
-    INDEX idx_customer (ID_KhachHang),
-    INDEX idx_status (TrangThai)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-mysqli_query($conn, $create_table);
-
 // Get return/refund requests with product price and quantity
-$sql_requests = "SELECT r.*, d.TongTien, k.HoVaTen as CustomerName, sp.TenSanPham, sp.GiaTien as ProductPrice, dct.SoLuong as ProductQuantity
+$sql_requests = "SELECT r.*, d.TongTien, k.HoVaTen as CustomerName, sp.TenSanPham, dct.DonGia as ProductPrice,
+                        dct.SoLuong as ProductQuantity, dct.ThanhTienThucTra
                  FROM return_refund_requests r
                  LEFT JOIN donhang d ON r.ID_DonHang = d.ID_DonHang
                  LEFT JOIN khachhang k ON r.ID_KhachHang = k.ID_KhachHang
@@ -100,8 +81,8 @@ $result_requests = mysqli_query($conn, $sql_requests);
                                                     <?php 
                                                     // Calculate refund amount based on product only
                                                     $product_price = intval($row['ProductPrice'] ?? 0);
-                                                    $product_quantity = intval($row['ProductQuantity'] ?? 0);
-                                                    $refund_amount = $product_price * $product_quantity;
+                                                    $product_quantity = intval($row['SoLuongYeuCau'] ?? 0);
+                                                    $refund_amount = return_refund_preview_amount($row);
                                                     echo number_format($refund_amount, 0, ',', '.'); ?> đ
                                                     <small class="text-muted d-block">(Sản phẩm: <?php echo number_format($product_price, 0, ',', '.'); ?> đ × <?php echo $product_quantity; ?>)</small>
                                                     <small class="text-muted">Tổng đơn: <?php echo number_format($row['TongTien'], 0, ',', '.'); ?> đ</small>
@@ -161,7 +142,7 @@ $result_requests = mysqli_query($conn, $sql_requests);
 
 <?php
 // Handle delete request
-if (isset($_GET['delete_request']) && $_GET['delete_request'] > 0) {
+if (false && isset($_GET['delete_request']) && $_GET['delete_request'] > 0) {
     $request_id = intval($_GET['delete_request']);
     mysqli_query($conn, "DELETE FROM return_refund_requests WHERE ID_Request = $request_id AND TrangThai = 'rejected'");
     header('Location: Staff_Return_Refund_Requests.php?msg=deleted');

@@ -1,0 +1,187 @@
+name: moshop
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MYSQL_HOST: ${MYSQL_HOST:-db}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DB: ${MYSQL_DB:-webmipham1}
+      MYSQL_USER: ${MYSQL_USER:-moshop}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${APP_PORT:-8088}:80"
+    volumes:
+      - product_uploads:/var/www/html/TTTT/WebBanHangMyPham/Image_upload
+      - root_uploads:/var/www/html/TTTT/Image_upload
+      - private_storage:/var/www/html/TTTT/storage/private
+      - admin_product_images:/var/www/html/TTTT/AdminManage/src/Products/IMG_Products
+      - admin_brand_images:/var/www/html/TTTT/AdminManage/src/Brands/IMG_Brand
+      - admin_category_images:/var/www/html/TTTT/AdminManage/src/Categorys/IMG_Category
+      - admin_news_images:/var/www/html/TTTT/AdminManage/src/News_Posts/IMG_News_Posts
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DB:-webmipham1}
+      MYSQL_USER: ${MYSQL_USER:-moshop}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      TZ: Asia/Ho_Chi_Minh
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./webmipham1.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [backend]
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MYSQL_HOST: ${MYSQL_HOST:-db}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DB: ${MYSQL_DB:-webmipham1}
+      MYSQL_USER: ${MYSQL_USER:-moshop}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+    command: ["sh", "-c", "i=0; while true; do if php /var/www/html/TTTT/bin/expire-payments.php && php /var/www/html/TTTT/bin/process-outbox.php && php /var/www/html/TTTT/bin/publish-scheduled-marketing.php; then touch /tmp/scheduler-heartbeat; fi; if [ $$((i % 5)) -eq 0 ]; then php /var/www/html/TTTT/bin/score-customers.php > /dev/null || true; fi; i=$$((i + 1)); sleep 60; done"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/scheduler-heartbeat && find /tmp/scheduler-heartbeat -mmin -2 -print -quit | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [backend]
+
+  ai:
+    profiles: ["ai"]
+    build:
+      context: .
+      dockerfile: Dockerfile.ai
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      MYSQL_HOST: ${MYSQL_HOST:-db}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DB: ${MYSQL_DB:-webmipham1}
+      MYSQL_USER: ${MYSQL_USER:-moshop}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      CHROMA_DIR: /data/chroma
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-}
+      AI_ALLOWED_ORIGINS: ${AI_ALLOWED_ORIGINS:-}
+    volumes:
+      - ai_chroma:/data/chroma
+    depends_on:
+      ollama:
+        condition: service_started
+      db:
+        condition: service_healthy
+    networks: [backend]
+
+  rag-worker:
+    profiles: ["ai"]
+    build:
+      context: .
+      dockerfile: Dockerfile.ai
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MYSQL_HOST: ${MYSQL_HOST:-db}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DB: ${MYSQL_DB:-webmipham1}
+      MYSQL_USER: ${MYSQL_USER:-moshop}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      CHROMA_DIR: /data/chroma
+    command: ["sh", "-c", "while true; do python sync_catalog_outbox.py; sleep 15; done"]
+    volumes:
+      - ai_chroma:/data/chroma
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+
+  ai-ingest:
+    profiles: ["ai-tools"]
+    build:
+      context: .
+      dockerfile: Dockerfile.ai
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MYSQL_HOST: db
+      MYSQL_PORT: 3306
+      MYSQL_DB: ${MYSQL_DB:-webmipham1}
+      MYSQL_USER: ${MYSQL_USER:-moshop}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      CHROMA_DIR: /data/chroma
+    command: ["python", "ingest_rag.py"]
+    volumes:
+      - ai_chroma:/data/chroma
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [backend]
+
+  ollama:
+    profiles: ["ai"]
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    networks: [backend]
+
+volumes:
+  mysql_data:
+  product_uploads:
+  root_uploads:
+  private_storage:
+  admin_product_images:
+  admin_brand_images:
+  admin_category_images:
+  admin_news_images:
+  ai_chroma:
+  ollama_data:
+
+networks:
+  backend:
+    driver: bridge

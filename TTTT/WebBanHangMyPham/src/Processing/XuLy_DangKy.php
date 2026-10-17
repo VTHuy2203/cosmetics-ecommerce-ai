@@ -1,335 +1,229 @@
 <?php
-// Disable error display to prevent corrupting AJAX response
-// Errors are still logged to error log file
-ini_set('display_errors', 0);
-ini_set('log_errors', 1);
-error_reporting(E_ALL);
+declare(strict_types=1);
 
-include("../DB_Connect.php");
-// Ensure session is started only once
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+ini_set('display_errors', '0');
 
-// Log all incoming POST data for debugging
-error_log("Registration attempt - REQUEST_METHOD: " . $_SERVER['REQUEST_METHOD']);
-error_log("Registration attempt - POST keys: " . implode(', ', array_keys($_POST)));
-error_log("Registration attempt - TenDangNhap: " . (isset($_POST['TenDangNhap']) ? $_POST['TenDangNhap'] : 'NOT SET'));
+require_once __DIR__ . '/../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
-if (
-    isset($_POST['HoVaTen']) &&
-    isset($_POST['Email']) &&
-    isset($_POST['Sdt']) &&
-    isset($_POST['DiaChi']) &&
-    isset($_POST['TenDangNhap']) &&
-    isset($_POST['MatKhau']) &&
-    $_SERVER['REQUEST_METHOD'] === 'POST'
-) {
-    $HoVaTen = mysqli_real_escape_string($conn, $_POST['HoVaTen']);
-    $Email = mysqli_real_escape_string($conn, $_POST['Email']);
-    $Sdt = mysqli_real_escape_string($conn, $_POST['Sdt']);
-    $DiaChi = mysqli_real_escape_string($conn, $_POST['DiaChi']);
-    $TenDangNhap = mysqli_real_escape_string($conn, $_POST['TenDangNhap']);
-    $MatKhau = mysqli_real_escape_string($conn, $_POST['MatKhau']);
-    $isShipper = isset($_POST['is_shipper']) && $_POST['is_shipper'] == '1';
-    $isEmployee = isset($_POST['is_employee']) && $_POST['is_employee'] == '1';
-    $registerRole = isset($_POST['register_role']) ? $_POST['register_role'] : 'customer';
-    $isStaff = ($isShipper || $isEmployee);
-    $license = isset($_POST['license']) ? mysqli_real_escape_string($conn, $_POST['license']) : '';
-    $vehicle = isset($_POST['vehicle']) ? mysqli_real_escape_string($conn, $_POST['vehicle']) : '';
-    $note = isset($_POST['note']) ? mysqli_real_escape_string($conn, $_POST['note']) : '';
-    $hometown = isset($_POST['hometown']) ? mysqli_real_escape_string($conn, $_POST['hometown']) : '';
-    $permanent_address = isset($_POST['permanent_address']) ? mysqli_real_escape_string($conn, $_POST['permanent_address']) : '';
-    $temporary_address = isset($_POST['temporary_address']) ? mysqli_real_escape_string($conn, $_POST['temporary_address']) : '';
-    $work_location = isset($_POST['work_location']) ? mysqli_real_escape_string($conn, $_POST['work_location']) : '';
-    $verification_code = isset($_POST['verification_code']) ? mysqli_real_escape_string($conn, $_POST['verification_code']) : '';
-    
-    // Handle ID card image uploads (for both shipper and employee)
-    $id_card_images = [];
-    if ($isStaff && isset($_FILES['id_card_images']) && is_array($_FILES['id_card_images']['name'])) {
-        $upload_dir = __DIR__ . '/../uploads/shipper_id_cards/';
-        if (!file_exists($upload_dir)) {
-            mkdir($upload_dir, 0777, true);
-        }
-        
-        for ($i = 0; $i < count($_FILES['id_card_images']['name']); $i++) {
-            if ($_FILES['id_card_images']['error'][$i] === UPLOAD_ERR_OK) {
-                $file_extension = strtolower(pathinfo($_FILES['id_card_images']['name'][$i], PATHINFO_EXTENSION));
-                if (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif'])) {
-                    $file_name = time() . '_' . $i . '_' . basename($_FILES['id_card_images']['name'][$i]);
-                    $target_file = $upload_dir . $file_name;
-                    
-                    if (move_uploaded_file($_FILES['id_card_images']['tmp_name'][$i], $target_file)) {
-                        $id_card_images[] = 'uploads/shipper_id_cards/' . $file_name;
-                    }
-                }
-            }
-        }
-    }
-
-    // Verify email verification code
-    if ($verification_code) {
-        // Get current time for logging
-        $current_time = time();
-        
-        // Check in database - code expires in 30 minutes
-        // Use MySQL's NOW() for consistent timezone handling
-        // Only check codes that haven't expired yet using MySQL's time comparison
-        $code_check = mysqli_query($conn, "SELECT *, 
-                                          UNIX_TIMESTAMP(created_at) as created_timestamp,
-                                          UNIX_TIMESTAMP(expires_at) as expires_timestamp,
-                                          UNIX_TIMESTAMP(NOW()) as server_timestamp
-                                          FROM email_verifications 
-                                          WHERE email = '$Email' 
-                                          AND code = '$verification_code' 
-                                          AND used = 0 
-                                          AND expires_at > NOW()
-                                          ORDER BY created_at DESC LIMIT 1");
-        
-        // Check for SQL errors
-        if (!$code_check) {
-            $sql_error = mysqli_error($conn);
-            error_log("SQL Error in OTP verification: " . $sql_error);
-            echo 'error';
-            exit();
-        }
-        
-        // Log verification attempt
-        error_log("OTP Verification - Email: $Email, Code: $verification_code, Current time: $current_time");
-        
-        if (mysqli_num_rows($code_check) == 0) {
-            // Code not found - check if it exists at all
-            $expired_check = mysqli_query($conn, "SELECT *, 
-                                                 UNIX_TIMESTAMP(created_at) as created_timestamp,
-                                                 UNIX_TIMESTAMP(expires_at) as expires_timestamp,
-                                                 UNIX_TIMESTAMP(NOW()) as server_timestamp
-                                                 FROM email_verifications 
-                                                 WHERE email = '$Email' 
-                                                 AND code = '$verification_code' 
-                                                 ORDER BY created_at DESC LIMIT 1");
-            
-            // Check for SQL errors
-            if (!$expired_check) {
-                $sql_error = mysqli_error($conn);
-                error_log("SQL Error in expired check: " . $sql_error);
-                echo 'error';
-                exit();
-            }
-            
-            if (mysqli_num_rows($expired_check) > 0) {
-                $expired_row = mysqli_fetch_array($expired_check);
-                
-                // Log expiry details
-                $created_ts = intval($expired_row['created_timestamp']);
-                $expires_ts = intval($expired_row['expires_timestamp']);
-                $server_now = intval($expired_row['server_timestamp']);
-                $elapsed = $current_time - $created_ts;
-                $remaining = $expires_ts - $current_time;
-                
-                error_log("OTP Expiry Check - Created: $created_ts, Expires: $expires_ts, Current: $current_time, Server NOW: $server_now, Elapsed: $elapsed seconds, Remaining: $remaining seconds, Used: " . $expired_row['used']);
-                
-                if ($expired_row['used'] == 1) {
-                    echo 'code_used';
-                } else {
-                    // Check expiry using server-side calculation
-                    if ($expires_ts > 0 && $current_time > $expires_ts) {
-                        error_log("OTP Expired - Code expired $remaining seconds ago");
-                        echo 'code_expired';
-                    } else {
-                        // Code exists but query didn't match - might be a timing issue
-                        error_log("OTP Not Found - Code exists but query didn't match. Expires at: " . $expired_row['expires_at']);
-                        echo 'code_expired';
-                    }
-                }
-            } else {
-                error_log("OTP Invalid - No code found for email: $Email, code: $verification_code");
-                echo 'invalid_code';
-            }
-            exit();
-        }
-        
-        // Code found - expiry already checked in SQL query (expires_at > NOW())
-        // So if we get here, the code is valid and not expired
-        $code_row = mysqli_fetch_array($code_check);
-        $created_ts = intval($code_row['created_timestamp']);
-        $expires_ts = intval($code_row['expires_timestamp']);
-        $server_now = intval($code_row['server_timestamp']);
-        $current_time = time();
-        $elapsed = $current_time - $created_ts;
-        $remaining = $expires_ts - $current_time;
-        
-        // Log verification details
-        error_log("OTP Found - Created: $created_ts, Expires: $expires_ts, Current: $current_time, Server NOW: $server_now, Elapsed: $elapsed seconds, Remaining: $remaining seconds");
-        
-        // Code is valid (expiry already checked in SQL WHERE clause)
-        
-        // Code is valid - mark as used
-        $update_result = mysqli_query($conn, "UPDATE email_verifications SET used = 1 WHERE id = " . intval($code_row['id']));
-        if (!$update_result) {
-            error_log("Failed to mark OTP as used: " . mysqli_error($conn));
-        }
-        error_log("OTP Verified Successfully - Code marked as used");
-    } else {
-        error_log("OTP Missing - No verification code provided");
-        echo 'missing_code';
-        exit();
-    }
-
-    //check tồn tại (check if username already exists)
-    $sql_check = "SELECT * FROM khachhang WHERE TenDangNhap = '$TenDangNhap'";
-    error_log("Registration - Checking username: '$TenDangNhap' with SQL: $sql_check");
-    $result_check = mysqli_query($conn, $sql_check);
-
-    if (!$result_check) {
-        error_log("Error checking username existence: " . mysqli_error($conn));
-        echo 'error';
-        exit();
-    }
-
-    $num_rows = mysqli_num_rows($result_check);
-    error_log("Registration - Username check result: $num_rows rows found for '$TenDangNhap'");
-
-    if ($num_rows > 0) {
-        // Log which existing user was found
-        $existing_user = mysqli_fetch_array($result_check);
-        error_log("Registration - Existing user found: ID=" . $existing_user['ID_KhachHang'] . ", TenDangNhap=" . $existing_user['TenDangNhap']);
-        echo 'tontai';
-        exit();
-    }
-
-    // Ensure role column exists (check first to avoid duplicate column error)
-    $check_role = mysqli_query($conn, "SHOW COLUMNS FROM `khachhang` LIKE 'Role'");
-    if (!$check_role || mysqli_num_rows($check_role) == 0) {
-        @mysqli_query($conn, "ALTER TABLE `khachhang` ADD `Role` ENUM('customer','shipper','employee','manager','admin') NOT NULL DEFAULT 'customer' AFTER `DiaChi`");
-    } else {
-        // Check if 'employee' is in the ENUM, if not, update it
-        $column_info = mysqli_fetch_assoc($check_role);
-        if (isset($column_info['Type']) && strpos($column_info['Type'], 'employee') === false) {
-            @mysqli_query($conn, "ALTER TABLE `khachhang` MODIFY `Role` ENUM('customer','shipper','employee','manager','admin') NOT NULL DEFAULT 'customer'");
-        }
-    }
-    
-    // Ensure shipper_requests table exists with new fields
-    @mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `shipper_requests` (
-        `id` INT AUTO_INCREMENT PRIMARY KEY,
-        `user_id` INT NOT NULL,
-        `license` VARCHAR(50) NOT NULL,
-        `vehicle` VARCHAR(50) NOT NULL,
-        `hometown` VARCHAR(255) NULL,
-        `permanent_address` TEXT NULL,
-        `temporary_address` TEXT NULL,
-        `id_card_front` VARCHAR(255) NULL,
-        `id_card_back` VARCHAR(255) NULL,
-        `note` TEXT NULL,
-        `status` ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
-        `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX idx_user_id (user_id),
-        INDEX idx_status (status)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    
-    // Add new columns if they don't exist (MySQL doesn't support IF NOT EXISTS in ALTER TABLE, so check first)
-    $checkCols = mysqli_query($conn, "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'shipper_requests'");
-    $existing_cols = [];
-    if ($checkCols) {
-        while ($col = mysqli_fetch_assoc($checkCols)) {
-            $existing_cols[] = $col['COLUMN_NAME'];
-        }
-    }
-    
-    if (!in_array('hometown', $existing_cols)) {
-        @mysqli_query($conn, "ALTER TABLE `shipper_requests` ADD COLUMN `hometown` VARCHAR(255) NULL AFTER `vehicle`");
-    }
-    if (!in_array('permanent_address', $existing_cols)) {
-        @mysqli_query($conn, "ALTER TABLE `shipper_requests` ADD COLUMN `permanent_address` TEXT NULL AFTER `hometown`");
-    }
-    if (!in_array('temporary_address', $existing_cols)) {
-        @mysqli_query($conn, "ALTER TABLE `shipper_requests` ADD COLUMN `temporary_address` TEXT NULL AFTER `permanent_address`");
-    }
-    if (!in_array('id_card_front', $existing_cols)) {
-        @mysqli_query($conn, "ALTER TABLE `shipper_requests` ADD COLUMN `id_card_front` VARCHAR(255) NULL AFTER `temporary_address`");
-    }
-    if (!in_array('id_card_back', $existing_cols)) {
-        @mysqli_query($conn, "ALTER TABLE `shipper_requests` ADD COLUMN `id_card_back` VARCHAR(255) NULL AFTER `id_card_front`");
-    }
-    if (!in_array('work_location', $existing_cols)) {
-        @mysqli_query($conn, "ALTER TABLE `shipper_requests` ADD COLUMN `work_location` ENUM('in-store','remote') NULL AFTER `note`");
-    }
-
-    //thêm user (insert user)
-    // Validate and sanitize role value to match ENUM
-    $valid_roles = ['customer', 'shipper', 'employee', 'manager', 'admin'];
-    $role = in_array($registerRole, $valid_roles) ? $registerRole : 'customer';
-    $role = mysqli_real_escape_string($conn, $role); // Additional safety
-    
-    $sql_insert_user = "INSERT INTO `khachhang` (`ID_KhachHang`, `TenDangNhap`, `MatKhau`, `HoVaTen`, `Email`, `SDT`, `DiaChi`, `Role`) 
-    VALUES (NULL, '$TenDangNhap', '$MatKhau', '$HoVaTen', '$Email', '$Sdt', '$DiaChi', '$role')";
-
-    $result_insert_user = mysqli_query($conn, $sql_insert_user);
-    
-    if (!$result_insert_user) {
-        $error_msg = mysqli_error($conn);
-        error_log("Failed to insert user: " . $error_msg);
-        echo 'error';
-        exit();
-    }
-
-    $user_id = mysqli_insert_id($conn);
-    error_log("User registered successfully - ID: $user_id, Role: $role");
-    
-    // Send WebSocket notification to Admin for new user registration
-    if ($role === 'customer') {
-        // Use the WebSocket_Push.php from WebSocketServer directory
-        // Path: from Processing/ go up 3 levels to TTTT/, then into WebSocketServer/
-        $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-        if (file_exists($wsPushFile)) {
-            require_once($wsPushFile);
-            if (function_exists('websocket_push_new_user')) {
-                websocket_push_new_user($user_id, $HoVaTen);
-            }
-        }
-    }
-    
-    // If staff registration (shipper or employee), create shipper request
-    // Vehicle not required anymore - simplified form
-    if ($isStaff && $license) {
-        $id_card_front = isset($id_card_images[0]) ? mysqli_real_escape_string($conn, $id_card_images[0]) : '';
-        $id_card_back = isset($id_card_images[1]) ? mysqli_real_escape_string($conn, $id_card_images[1]) : '';
-        
-        // Use main address as permanent_address if not provided
-        if (empty($permanent_address)) {
-            $permanent_address = $DiaChi;
-        }
-        $work_location_escaped = mysqli_real_escape_string($conn, $work_location);
-        $sql_insert_shipper = "INSERT INTO `shipper_requests` (`user_id`, `license`, `vehicle`, `hometown`, `permanent_address`, `temporary_address`, `id_card_front`, `id_card_back`, `note`, `work_location`, `status`) 
-                               VALUES ('$user_id', '$license', '$vehicle', '$hometown', '$permanent_address', '$temporary_address', '$id_card_front', '$id_card_back', '$note', '$work_location_escaped', 'pending')";
-        $shipper_result = mysqli_query($conn, $sql_insert_shipper);
-        if ($shipper_result) {
-            error_log("Shipper request created successfully for user ID: $user_id");
-            // Don't show success yet - wait for approval
-            echo ($isShipper ? 'shipper_pending' : 'employee_pending');
-        } else {
-            error_log("Failed to create shipper request: " . mysqli_error($conn));
-            echo 'error';
-        }
-    } else {
-        error_log("Regular customer registration successful for user ID: $user_id");
-        echo 'success';
-    }
-
-} else {
-    // Log why registration failed
-    $missing_fields = [];
-    if (!isset($_POST['HoVaTen'])) $missing_fields[] = 'HoVaTen';
-    if (!isset($_POST['Email'])) $missing_fields[] = 'Email';
-    if (!isset($_POST['Sdt'])) $missing_fields[] = 'Sdt';
-    if (!isset($_POST['DiaChi'])) $missing_fields[] = 'DiaChi';
-    if (!isset($_POST['TenDangNhap'])) $missing_fields[] = 'TenDangNhap';
-    if (!isset($_POST['MatKhau'])) $missing_fields[] = 'MatKhau';
-    if ($_SERVER['REQUEST_METHOD'] !== 'POST') $missing_fields[] = 'REQUEST_METHOD not POST';
-    
-    error_log("Registration failed - Missing fields: " . implode(', ', $missing_fields));
-    error_log("Registration failed - REQUEST_METHOD: " . $_SERVER['REQUEST_METHOD']);
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    http_response_code(405);
     echo 'error';
+    exit;
 }
-?>
+
+require_csrf();
+require_turnstile('register');
+
+/** @return never */
+function registration_response(string $value, int $status = 200): never
+{
+    http_response_code($status);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo $value;
+    exit;
+}
+
+/** @param list<string> $paths */
+function remove_registration_uploads(array $paths): void
+{
+    foreach ($paths as $path) {
+        if (is_file($path)) {
+            @unlink($path);
+        }
+    }
+}
+
+$name = trim((string) ($_POST['HoVaTen'] ?? ''));
+$email = strtolower(trim((string) ($_POST['Email'] ?? '')));
+$phone = trim((string) ($_POST['Sdt'] ?? ''));
+$address = trim((string) ($_POST['DiaChi'] ?? ''));
+$username = trim((string) ($_POST['TenDangNhap'] ?? ''));
+$plainPassword = (string) ($_POST['MatKhau'] ?? '');
+$verificationCode = trim((string) ($_POST['verification_code'] ?? ''));
+$requestedRole = strtolower(trim((string) ($_POST['register_role'] ?? 'customer')));
+
+if (!in_array($requestedRole, ['customer', 'shipper', 'employee'], true)) {
+    registration_response('error', 422);
+}
+// Phone and address are stored on the account and prefill every checkout: both are required,
+// the phone as a normalized Vietnamese mobile number (0xxxxxxxxx).
+$phone = preg_replace('/[\s.\-()]/', '', $phone) ?? '';
+if (preg_match('/^(?:0|\+84|84)((?:3|5|7|8|9)\d{8})$/', $phone, $phoneMatch) === 1) {
+    $phone = '0' . $phoneMatch[1];
+} else {
+    registration_response('invalid_phone', 422);
+}
+if (mb_strlen($address) < 10 || mb_strlen($address) > 255) {
+    registration_response('invalid_address', 422);
+}
+if ($name === '' || mb_strlen($name) > 50
+    || !filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 100
+    || !preg_match('/^[A-Za-z0-9._-]{4,50}$/', $username)
+    // "guest_" names belong to guest checkout accounts (CheckoutService::ensureGuestCustomer).
+    || str_starts_with(strtolower($username), 'guest_')) {
+    registration_response('error', 422);
+}
+if (strlen($plainPassword) < 10 || strlen($plainPassword) > 255) {
+    registration_response('weak_password', 422);
+}
+if ($verificationCode === '' || !preg_match('/^[0-9]{6}$/', $verificationCode)) {
+    registration_response('missing_code', 422);
+}
+
+$isStaffRequest = $requestedRole !== 'customer';
+$license = trim((string) ($_POST['license'] ?? ''));
+$vehicle = mb_substr(trim((string) ($_POST['vehicle'] ?? '')), 0, 50);
+$hometown = mb_substr(trim((string) ($_POST['hometown'] ?? '')), 0, 255);
+$permanentAddress = mb_substr(trim((string) ($_POST['permanent_address'] ?? $address)), 0, 1000);
+$temporaryAddress = mb_substr(trim((string) ($_POST['temporary_address'] ?? '')), 0, 1000);
+$note = mb_substr(trim((string) ($_POST['note'] ?? '')), 0, 2000);
+$workLocation = trim((string) ($_POST['work_location'] ?? ''));
+if (!in_array($workLocation, ['', 'in-store', 'remote'], true)) {
+    registration_response('error', 422);
+}
+if ($isStaffRequest && ($license === '' || mb_strlen($license) > 50 || $hometown === '' || $temporaryAddress === '')) {
+    registration_response('invalid_staff_data', 422);
+}
+
+$storedFiles = [];
+$absoluteFiles = [];
+if ($isStaffRequest) {
+    $uploads = $_FILES['id_card_images'] ?? null;
+    if (!is_array($uploads) || !isset($uploads['name'], $uploads['tmp_name'], $uploads['error'], $uploads['size'])
+        || !is_array($uploads['name']) || count($uploads['name']) !== 2) {
+        registration_response('invalid_upload', 422);
+    }
+
+    $uploadDirectory = dirname(__DIR__, 3) . '/storage/private/shipper_id_cards';
+    if (!is_dir($uploadDirectory) && !mkdir($uploadDirectory, 0750, true) && !is_dir($uploadDirectory)) {
+        registration_response('error', 500);
+    }
+
+    $allowedMimeTypes = ['image/jpeg' => 'jpg', 'image/png' => 'png'];
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    foreach ($uploads['name'] as $index => $_originalName) {
+        if (($uploads['error'][$index] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
+            || (int) ($uploads['size'][$index] ?? 0) < 1
+            || (int) $uploads['size'][$index] > 5 * 1024 * 1024
+            || !is_uploaded_file((string) ($uploads['tmp_name'][$index] ?? ''))) {
+            remove_registration_uploads($absoluteFiles);
+            registration_response('invalid_upload', 422);
+        }
+
+        $temporaryFile = (string) $uploads['tmp_name'][$index];
+        $mime = $finfo->file($temporaryFile);
+        if (!is_string($mime) || !isset($allowedMimeTypes[$mime])) {
+            remove_registration_uploads($absoluteFiles);
+            registration_response('invalid_upload', 422);
+        }
+
+        $fileName = bin2hex(random_bytes(16)) . '.' . $allowedMimeTypes[$mime];
+        $absolutePath = $uploadDirectory . DIRECTORY_SEPARATOR . $fileName;
+        if (!move_uploaded_file($temporaryFile, $absolutePath)) {
+            remove_registration_uploads($absoluteFiles);
+            registration_response('invalid_upload', 500);
+        }
+        chmod($absolutePath, 0640);
+        $absoluteFiles[] = $absolutePath;
+        $storedFiles[] = 'shipper_id_cards/' . $fileName;
+    }
+}
+
+$conn->begin_transaction();
+try {
+    $otp = $conn->prepare(
+        'SELECT id, used, expires_at FROM email_verifications
+         WHERE email = ? AND code = ? ORDER BY created_at DESC LIMIT 1 FOR UPDATE'
+    );
+    $otp->bind_param('ss', $email, $verificationCode);
+    $otp->execute();
+    $verification = $otp->get_result()->fetch_assoc();
+    if (!$verification) {
+        $conn->rollback();
+        remove_registration_uploads($absoluteFiles);
+        registration_response('invalid_code', 422);
+    }
+    if ((int) $verification['used'] === 1) {
+        $conn->rollback();
+        remove_registration_uploads($absoluteFiles);
+        registration_response('code_used', 422);
+    }
+    if (strtotime((string) $verification['expires_at']) <= time()) {
+        $conn->rollback();
+        remove_registration_uploads($absoluteFiles);
+        registration_response('code_expired', 422);
+    }
+
+    $passwordHash = password_hash($plainPassword, PASSWORD_DEFAULT);
+    $initialRole = 'customer';
+    $insertUser = $conn->prepare(
+        'INSERT INTO khachhang (TenDangNhap, MatKhau, HoVaTen, Email, SDT, DiaChi, Role)
+         VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+    $insertUser->bind_param('sssssss', $username, $passwordHash, $name, $email, $phone, $address, $initialRole);
+    $insertUser->execute();
+    $userId = (int) $conn->insert_id;
+
+    if ($isStaffRequest) {
+        $front = $storedFiles[0];
+        $back = $storedFiles[1];
+        $insertRequest = $conn->prepare(
+            "INSERT INTO shipper_requests
+             (user_id, license, vehicle, hometown, permanent_address, temporary_address,
+              id_card_front, id_card_back, note, work_location, requested_role, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, 'pending')"
+        );
+        $insertRequest->bind_param(
+            'issssssssss',
+            $userId,
+            $license,
+            $vehicle,
+            $hometown,
+            $permanentAddress,
+            $temporaryAddress,
+            $front,
+            $back,
+            $note,
+            $workLocation,
+            $requestedRole
+        );
+        $insertRequest->execute();
+    }
+
+    $markUsed = $conn->prepare('UPDATE email_verifications SET used = 1 WHERE id = ? AND used = 0');
+    $verificationId = (int) $verification['id'];
+    $markUsed->bind_param('i', $verificationId);
+    $markUsed->execute();
+    if ($markUsed->affected_rows !== 1) {
+        throw new RuntimeException('OTP was consumed concurrently.');
+    }
+
+    $payload = json_encode(
+        ['user_id' => $userId, 'requested_role' => $requestedRole],
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+    $event = $conn->prepare(
+        "INSERT INTO outbox_events(event_type, aggregate_type, aggregate_id, payload)
+         VALUES ('user.registered', 'user', ?, ?)"
+    );
+    $aggregateId = (string) $userId;
+    $event->bind_param('ss', $aggregateId, $payload);
+    $event->execute();
+
+    $conn->commit();
+    registration_response($requestedRole === 'customer' ? 'success' : $requestedRole . '_pending');
+} catch (mysqli_sql_exception $error) {
+    $conn->rollback();
+    remove_registration_uploads($absoluteFiles);
+    if ((int) $error->getCode() === 1062) {
+        registration_response('tontai', 409);
+    }
+    error_log('Registration failed: ' . $error->getMessage());
+    registration_response('error', 500);
+} catch (Throwable $error) {
+    $conn->rollback();
+    remove_registration_uploads($absoluteFiles);
+    error_log('Registration failed: ' . $error->getMessage());
+    registration_response('error', 500);
+}

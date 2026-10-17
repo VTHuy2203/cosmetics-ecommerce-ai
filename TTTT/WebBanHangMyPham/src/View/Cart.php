@@ -1,16 +1,73 @@
 <?php
-// Start session before including any files
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
+require_once __DIR__ . '/../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__) . '/Services/CustomerEventService.php';
+require_once dirname(__DIR__) . '/Services/CustomerScoringService.php';
+require_once dirname(__DIR__) . '/Services/VoucherService.php';
+require_once dirname(__DIR__) . '/Services/ShippingService.php';
+
+$shippingRegions = (new ShippingService($conn))->activeRegions();
+
+$claimedVouchers = [];
+if (!empty($_SESSION['IDNguoiDung'])) {
+    $claimedStatement = $conn->prepare(
+        "SELECT v.code, v.name, v.discount_percent, v.min_order_amount, v.ends_at
+         FROM voucher_claims c INNER JOIN vouchers v ON v.id = c.voucher_id
+         WHERE c.user_id = ? AND c.status = 'claimed' AND v.status = 'active'
+           AND v.starts_at <= NOW() AND v.ends_at > NOW()
+         ORDER BY v.ends_at ASC"
+    );
+    $claimedUserId = (int) $_SESSION['IDNguoiDung'];
+    $claimedStatement->bind_param('i', $claimedUserId);
+    $claimedStatement->execute();
+    $claimedVouchers = $claimedStatement->get_result()->fetch_all(MYSQLI_ASSOC);
+}
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && isset($_POST['CapNhatSoLuong'], $_POST['IDCapNhatSoLuong'])) {
+    require_csrf();
+    $newQuantity = filter_var($_POST['CapNhatSoLuong'], FILTER_VALIDATE_INT);
+    $productId = filter_var($_POST['IDCapNhatSoLuong'], FILTER_VALIDATE_INT);
+    if ($newQuantity === false || $newQuantity < 1 || $productId === false || $productId < 1) {
+        http_response_code(422);
+        exit('invalid_cart_quantity');
+    }
+
+    $stockStatement = $conn->prepare('SELECT SoLuong FROM sanpham WHERE IDSanPham = ? LIMIT 1');
+    $stockStatement->bind_param('i', $productId);
+    $stockStatement->execute();
+    $stockRow = $stockStatement->get_result()->fetch_assoc();
+    if ($stockRow !== null) {
+        $availableStock = (int) $stockRow['SoLuong'];
+        if ($availableStock <= 0) {
+            foreach ($_SESSION['cart'] ?? [] as $index => $item) {
+                if ((int) ($item[0] ?? 0) === $productId) {
+                    array_splice($_SESSION['cart'], $index, 1);
+                    break;
+                }
+            }
+            $_SESSION['stock_warning'] = 'Sản phẩm đã hết hàng và đã được xóa khỏi giỏ hàng.';
+        } else {
+            if ($newQuantity > $availableStock) {
+                $newQuantity = $availableStock;
+                $_SESSION['stock_warning'] = "Số lượng vượt quá tồn kho. Đã tự động điều chỉnh về số lượng tối đa: $availableStock";
+            }
+            foreach ($_SESSION['cart'] ?? [] as $index => $item) {
+                if ((int) ($item[0] ?? 0) === $productId) {
+                    $_SESSION['cart'][$index][3] = $newQuantity;
+                    break;
+                }
+            }
+        }
+    }
+    header('Location: Cart.php', true, 303);
+    exit();
 }
 
 // Handle AJAX requests first (before any HTML output)
 if (isset($_POST['addcart']) && isset($_POST['IDSanPham'])) {
-    // Include DB connection only (no Head.php to avoid HTML output)
-    include("../DB_Connect.php");
-    
     // Set JSON header
     header('Content-Type: application/json; charset=utf-8');
+    require_csrf();
     
     //nếu ch có giỏ hàng thì tạo giỏ hàng mới
     if (!isset($_SESSION['cart'])) {
@@ -18,8 +75,10 @@ if (isset($_POST['addcart']) && isset($_POST['IDSanPham'])) {
     }
 
     $product_id = intval($_POST['IDSanPham']);
-    $sql_getInfAddCart = "SELECT * FROM sanpham WHERE IDSanPham = " . $product_id;
-    $result_getInfAddCart = mysqli_query($conn, $sql_getInfAddCart);
+    $productStmt = $conn->prepare('SELECT * FROM sanpham WHERE IDSanPham = ? LIMIT 1');
+    $productStmt->bind_param('i', $product_id);
+    $productStmt->execute();
+    $result_getInfAddCart = $productStmt->get_result();
 
     // Check if query succeeded and product exists
     if (!$result_getInfAddCart) {
@@ -82,12 +141,19 @@ if (isset($_POST['addcart']) && isset($_POST['IDSanPham'])) {
         }
     }
     
+    CustomerEventService::recordMysqli(
+        $conn,
+        CustomerEventService::currentUserId(),
+        CustomerEventService::sessionId(),
+        'cart_add',
+        ['product_id' => (int) $IDSanPham, 'quantity' => 1, 'cart_quantity' => $new_total_quantity]
+    );
+    CustomerScoringService::refreshQuietly(CustomerEventService::currentUserId(), CustomerEventService::sessionId());
     echo json_encode(['status' => 'success', 'message' => 'Sản phẩm đã được thêm vào giỏ hàng.']);
     exit();
 }
 
 // If not an AJAX request, continue with normal page load
-include("../DB_Connect.php");
 include("../Layouts/Head.php");
 
 //nếu ch có giỏ hàng thì tạo giỏ hàng mới
@@ -97,13 +163,18 @@ if (!isset($_SESSION['cart'])) {
 
 //xóa all sp trong giỏ hàng
 if (isset($_POST['del_all_cart']) && ($_POST['del_all_cart'] == 'del_all_cart')) {
+    require_csrf();
     unset($_SESSION['cart']);
     unset($_SESSION['sum_Total']);
 }
 
 //xóa sp trong giỏ hàng
-if (isset($_GET['del_id']) && ($_GET['del_id'] >= 0)) {
-    array_splice($_SESSION['cart'], $_GET['del_id'], 1);
+if (isset($_POST['del_id']) && filter_var($_POST['del_id'], FILTER_VALIDATE_INT) !== false) {
+    require_csrf();
+    $deleteIndex = (int) $_POST['del_id'];
+    if ($deleteIndex >= 0 && $deleteIndex < count($_SESSION['cart'])) {
+        array_splice($_SESSION['cart'], $deleteIndex, 1);
+    }
 }
 
 //tất cả sp trong giỏ hàng
@@ -152,7 +223,7 @@ function showCart()
                             <h6 class="mb-0">' . $_SESSION['cart'][$i][4] . 'đ</h6>
                         </div>
                         <div class="col-md-1 col-lg-1 col-xl-1 text-end">
-                            <a href="Cart.php?del_id=' . $i . '" class="text-muted"><i class="fas fa-times text-danger"></i></a>
+                            <form action="Cart.php" method="post" class="d-inline">' . csrf_field() . '<input type="hidden" name="del_id" value="' . $i . '"><button type="submit" class="btn btn-link text-muted p-0" aria-label="Xóa sản phẩm"><i class="fas fa-times text-danger"></i></button></form>
                         </div>
                     </div>';
             }
@@ -170,49 +241,6 @@ function showCart()
             <div class="row mb-4 d-flex justify-content-between align-items-center">
                 <h6 class="text-red mb-0">Giỏ hàng đang trống</h6>
             </div>';
-    }
-}
-
-//cập nhật số lượng sp qua input số lượng
-if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
-    if (isset($_SESSION['cart'])) {
-        $new_quantity = intval($_GET['CapNhatSoLuong']);
-        $product_id = intval($_GET['IDCapNhatSoLuong']);
-        
-        // Check stock availability
-        $sql_check_stock = "SELECT SoLuong FROM sanpham WHERE IDSanPham = '$product_id'";
-        $result_check_stock = mysqli_query($conn, $sql_check_stock);
-        if ($result_check_stock && mysqli_num_rows($result_check_stock) > 0) {
-            $stock_row = mysqli_fetch_array($result_check_stock);
-            if ($stock_row && isset($stock_row['SoLuong'])) {
-                $available_stock = intval($stock_row['SoLuong']);
-                
-                // Only enforce stock limit if product actually has stock
-                if ($available_stock > 0 && $new_quantity > $available_stock) {
-                    // Set to max available stock
-                    $new_quantity = $available_stock;
-                    $_SESSION['stock_warning'] = "Số lượng vượt quá tồn kho. Đã tự động điều chỉnh về số lượng tối đa: $available_stock";
-                } elseif ($available_stock <= 0) {
-                    // Product is out of stock, remove from cart or set to 0
-                    $_SESSION['stock_warning'] = "Sản phẩm đã hết hàng và đã được xóa khỏi giỏ hàng.";
-                    // Remove product from cart
-                    for ($i = 0; $i < sizeof($_SESSION['cart']); $i++) {
-                        if ($_SESSION['cart'][$i][0] == $product_id) {
-                            array_splice($_SESSION['cart'], $i, 1);
-                            header('Location: Cart.php');
-                            exit();
-                        }
-                    }
-                }
-            }
-        }
-        
-        for ($i = 0; $i < sizeof($_SESSION['cart']); $i++) {
-            if ($_SESSION['cart'][$i][0] == $product_id) {
-                $_SESSION['cart'][$i][3] = $new_quantity;
-                break;
-            }
-        }
     }
 }
 
@@ -249,6 +277,7 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
 
                                         <hr class="my-4">
                                         <form action="Cart.php" method="post">
+                                            <?php echo csrf_field(); ?>
                                             <button type="submit" name="del_all_cart" value="del_all_cart" class="btn btn-delete-cart-all">Xóa tất cả</button>
                                         </form>
                                         <hr class="my-4">
@@ -268,23 +297,15 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
                                         <div class="mb-4 pb-2">
                                             <select id="paymentMethod" class="select form-control" onchange="updatePaymentButtons()">
                                                 <option value="cod">Nhận Hàng Thanh Toán (COD)</option>
-                                                <option value="qr">Chuyển khoản qua VietQR</option>
                                                 <?php
+                                                // VietQR and balance payments need an account; guests pay on delivery.
                                                 if (isset($_SESSION['user'])) {
-                                                    // Get account balance - check if column exists first
-                                                    $checkCol = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khachhang' AND COLUMN_NAME = 'SoDu'");
-                                                    $colExists = false;
-                                                    if ($checkCol) {
-                                                        $colRow = mysqli_fetch_assoc($checkCol);
-                                                        $colExists = intval($colRow['c']) > 0;
-                                                    }
-                                                    if (!$colExists) {
-                                                        @mysqli_query($conn, "ALTER TABLE `khachhang` ADD `SoDu` BIGINT NOT NULL DEFAULT 0 AFTER `DiaChi`");
-                                                    }
-                                                    
-                                                    $sql_user = "SELECT ID_KhachHang, SoDu FROM khachhang WHERE TenDangNhap = '" . $_SESSION['user'] . "'";
-                                                    $result_user = mysqli_query($conn, $sql_user);
-                                                    $user_row = mysqli_fetch_array($result_user);
+                                                    echo '<option value="qr">Chuyển khoản qua VietQR</option>';
+                                                    $balanceStmt = $conn->prepare('SELECT ID_KhachHang, SoDu FROM khachhang WHERE TenDangNhap = ? LIMIT 1');
+                                                    $balanceUsername = (string) $_SESSION['user'];
+                                                    $balanceStmt->bind_param('s', $balanceUsername);
+                                                    $balanceStmt->execute();
+                                                    $user_row = $balanceStmt->get_result()->fetch_assoc();
                                                     $account_balance = isset($user_row['SoDu']) ? intval($user_row['SoDu']) : 0;
                                                     
                                                     // Always display account balance payment option, even if balance is 0
@@ -297,10 +318,7 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
                                         <?php
                                         // Display account balance information (without warning message)
                                         if (isset($_SESSION['user'])) {
-                                            $sql_user = "SELECT ID_KhachHang, SoDu FROM khachhang WHERE TenDangNhap = '" . $_SESSION['user'] . "'";
-                                            $result_user = mysqli_query($conn, $sql_user);
-                                            $user_row = mysqli_fetch_array($result_user);
-                                            $account_balance = isset($user_row['SoDu']) ? intval($user_row['SoDu']) : 0;
+                                            $account_balance = $account_balance ?? 0;
                                             
                                             // Only display balance information, no warning
                                             echo '<div class="mb-3">';
@@ -309,25 +327,68 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
                                         }
                                         ?>
 
+                                        <?php if (!isset($_SESSION['user'])): ?>
+                                        <p class="small mb-4">Mua hàng không cần tài khoản: thanh toán khi nhận hàng, nhân viên gọi xác nhận đơn. <a href="Login.php" class="fw-bold text-dark">Đăng nhập</a> để dùng mã giảm giá, VietQR và theo dõi đơn hàng.</p>
+                                        <?php else: ?>
                                         <h5 class="text-uppercase mb-3">Mã Giảm Giá</h5>
 
-                                        <div class="mb-5">
-                                            <div class="form-outline">
-                                                <input type="text" id="form3Examplea2" placeholder="Nhập tại đây..." class="form-control form-control-lg" />
+                                        <div class="mb-4">
+                                            <div class="input-group">
+                                                <input type="text" id="voucherCode" maxlength="32"
+                                                       value="<?php echo htmlspecialchars((string) ($_SESSION['voucher_code'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>"
+                                                       placeholder="Ví dụ: MOSHOP20" class="form-control text-uppercase" />
+                                                <button type="button" class="btn btn-outline-dark" onclick="applyVoucher()">Áp dụng</button>
+                                                <?php if (!empty($_SESSION['voucher_code'])): ?>
+                                                    <button type="button" class="btn btn-outline-danger" onclick="removeVoucher()" title="Bỏ mã">×</button>
+                                                <?php endif; ?>
                                             </div>
+                                            <small id="voucherMessage" class="d-block mt-2 text-muted">Mã được kiểm tra lại khi tạo đơn hàng.</small>
+                                            <?php if ($claimedVouchers !== []): ?>
+                                                <div class="mt-3">
+                                                    <small class="d-block text-muted mb-2">Voucher đã nhận:</small>
+                                                    <div class="d-flex flex-wrap gap-2">
+                                                        <?php foreach ($claimedVouchers as $claimedVoucher): ?>
+                                                            <button type="button" class="btn btn-sm btn-outline-success claimed-voucher-button"
+                                                                data-voucher-code="<?php echo htmlspecialchars((string) $claimedVoucher['code'], ENT_QUOTES, 'UTF-8'); ?>">
+                                                                #<?php echo htmlspecialchars((string) $claimedVoucher['code'], ENT_QUOTES, 'UTF-8'); ?> · -<?php echo (int) $claimedVoucher['discount_percent']; ?>%
+                                                            </button>
+                                                        <?php endforeach; ?>
+                                                    </div>
+                                                </div>
+                                            <?php endif; ?>
+                                        </div>
+                                        <?php endif; ?>
+                                        <h5 class="text-uppercase mb-3">Khu vực giao hàng</h5>
+                                        <div class="mb-4">
+                                            <select id="shippingRegion" class="form-control" onchange="refreshShippingQuote()" <?php echo $shippingRegions===[]?'disabled':''; ?>>
+                                                <option value="">-- Chọn khu vực --</option>
+                                                <?php foreach($shippingRegions as $region): ?><option value="<?php echo htmlspecialchars($region['code'],ENT_QUOTES,'UTF-8'); ?>" <?php echo count($shippingRegions)===1?'selected':''; ?>><?php echo htmlspecialchars($region['name'],ENT_QUOTES,'UTF-8'); ?></option><?php endforeach; ?>
+                                            </select>
+                                            <?php if($shippingRegions===[]): ?><small class="text-danger">Chưa có biểu phí được kích hoạt. Vui lòng liên hệ cửa hàng.</small><?php endif; ?>
                                         </div>
 
                                         <hr class="my-4">
 
                                         <?php
-                                        // Calculate shipping fee: 25,000 VND for orders under 500,000 VND
                                         $subtotal = isset($_SESSION['sum_Total']) ? intval($_SESSION['sum_Total']) : 0;
-                                        $free_shipping_threshold = 500000; // 500,000 VND
-                                        $shipping_fee = 0;
-                                        if ($subtotal > 0 && $subtotal < $free_shipping_threshold) {
-                                            $shipping_fee = 25000; // 25,000 VND shipping fee
+                                        $voucher_discount = 0;
+                                        $voucher_error = '';
+                                        $applied_voucher = null;
+                                        if ($subtotal > 0 && !empty($_SESSION['voucher_code']) && isset($_SESSION['user'])) {
+                                            try {
+                                                $voucherUserId = (int) ($user_row['ID_KhachHang'] ?? ($_SESSION['IDNguoiDung'] ?? 0));
+                                                $applied_voucher = (new VoucherService($conn))->validate(
+                                                    (string) $_SESSION['voucher_code'],
+                                                    $voucherUserId,
+                                                    $subtotal
+                                                );
+                                                $voucher_discount = (int) $applied_voucher['discount_amount'];
+                                            } catch (VoucherException $voucherException) {
+                                                $voucher_error = $voucherException->getMessage();
+                                                unset($_SESSION['voucher_code']);
+                                            }
                                         }
-                                        $total_with_shipping = $subtotal + $shipping_fee;
+                                        $total_with_shipping = max(0, $subtotal - $voucher_discount);
                                         ?>
                                         
                                         <div class="d-flex justify-content-between mb-2">
@@ -335,44 +396,41 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
                                             <h6><?php echo number_format($subtotal, 0, ',', '.'); ?> đ</h6>
                                         </div>
                                         
-                                        <?php if ($shipping_fee > 0): ?>
                                         <div class="d-flex justify-content-between mb-2">
                                             <h6 class="text-uppercase">Phí vận chuyển</h6>
-                                            <h6><?php echo number_format($shipping_fee, 0, ',', '.'); ?> đ</h6>
+                                            <h6 id="shippingFeeDisplay">Chọn khu vực</h6>
                                         </div>
-                                        <?php else: ?>
-                                        <div class="d-flex justify-content-between mb-2">
-                                            <h6 class="text-success text-uppercase">
-                                                <i class="fas fa-check-circle me-2"></i>Đơn hàng này được miễn phí vận chuyển.
-                                            </h6>
-                                            <h6 class="text-success">Miễn phí</h6>
+                                        <small id="freeShippingHint" class="d-block text-success mb-2"></small>
+
+                                        <?php if ($applied_voucher !== null): ?>
+                                        <div class="d-flex justify-content-between mb-2 text-success">
+                                            <h6 class="text-uppercase">Giảm giá (<?php echo htmlspecialchars((string) $applied_voucher['code'], ENT_QUOTES, 'UTF-8'); ?>)</h6>
+                                            <h6>-<?php echo number_format($voucher_discount, 0, ',', '.'); ?> đ</h6>
                                         </div>
+                                        <?php elseif ($voucher_error !== ''): ?>
+                                        <div class="alert alert-warning py-2 small"><?php echo htmlspecialchars($voucher_error, ENT_QUOTES, 'UTF-8'); ?></div>
                                         <?php endif; ?>
                                         
                                         <hr class="my-3">
 
                                         <div class="d-flex justify-content-between mb-5">
                                             <h5 class="text-uppercase"><strong>Tổng cộng</strong></h5>
-                                            <h5><strong><?php echo number_format($total_with_shipping, 0, ',', '.'); ?> đ</strong></h5>
+                                            <h5><strong id="checkoutTotalDisplay"><?php echo number_format($total_with_shipping, 0, ',', '.'); ?> đ + phí ship</strong></h5>
                                         </div>
 
                                         <?php
-                                        // VIP Progress tracking - Show progress towards becoming potential customer
+                                        // Informational status only. Promotions must be calculated by checkout,
+                                        // so this block never promises a discount that is not in the order total.
                                         if (isset($_SESSION['user']) && isset($_SESSION['IDNguoiDung'])) {
                                             try {
-                                                $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-                                                $pdoCart = new PDO($dsn, "root", "", [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-                                                $stmt = $pdoCart->prepare("SELECT customer_label, total_weekly_purchase, discount_percent FROM khachhang WHERE ID_KhachHang = ?");
+                                                $pdoCart = app_pdo();
+                                                $stmt = $pdoCart->prepare("SELECT customer_label,customer_value_tier FROM khachhang WHERE ID_KhachHang = ?");
                                                 $stmt->execute([$_SESSION['IDNguoiDung']]);
                                                 $custData = $stmt->fetch(PDO::FETCH_ASSOC);
 
                                                 $customerLabel = $custData['customer_label'] ?? 'normal';
-                                                $weeklyPurchase = (int)($custData['total_weekly_purchase'] ?? 0);
-                                                $discountPercent = (int)($custData['discount_percent'] ?? 0);
-                                                $targetAmount = 5000000;
-                                                $progressPercent = min(100, ($weeklyPurchase / $targetAmount) * 100);
-                                                $amountNeeded = max(0, $targetAmount - $weeklyPurchase);
                                                 $isPotential = ($customerLabel === 'potential');
+                                                $valueTier = htmlspecialchars((string)($custData['customer_value_tier'] ?? 'new'));
 
                                                 echo '<div class="card mb-4" style="background: linear-gradient(135deg, ' . ($isPotential ? '#fff9e6' : '#f0f4ff') . ' 0%, ' . ($isPotential ? '#fff3cd' : '#e8ecf1') . ' 100%); border: 2px solid ' . ($isPotential ? '#ffd700' : '#667eea') . ';">';
                                                 echo '<div class="card-body p-3">';
@@ -382,23 +440,13 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
                                                     echo '<span style="font-size:24px;">⭐</span>';
                                                     echo '<strong class="ms-2" style="color:#e85d04;">Bạn là Khách hàng Tiềm năng!</strong>';
                                                     echo '</div>';
-                                                    echo '<p class="mb-2 small">Bạn đang được giảm <strong>' . $discountPercent . '%</strong> cho tất cả đơn hàng.</p>';
-                                                    echo '<p class="mb-0 small text-muted">Tiếp tục mua sắm trên 1.000.000đ/tuần để duy trì ưu đãi.</p>';
+                                                    echo '<p class="mb-0 small">Mơ Shop sẽ ưu tiên hỗ trợ nhu cầu và đơn hàng hiện tại của bạn.</p>';
                                                 } else {
                                                     echo '<div class="d-flex align-items-center mb-2">';
                                                     echo '<span style="font-size:20px;">🎯</span>';
-                                                    echo '<strong class="ms-2" style="color:#667eea;">Tiến trình VIP</strong>';
+                                                    echo '<strong class="ms-2" style="color:#667eea;">Hạng thành viên: ' . $valueTier . '</strong>';
                                                     echo '</div>';
-                                                    echo '<p class="mb-2 small">Mua thêm <strong>' . number_format($amountNeeded, 0, ',', '.') . 'đ</strong> để trở thành Khách hàng Tiềm năng và được <strong>giảm 20%</strong>!</p>';
-
-                                                    // Progress bar
-                                                    echo '<div class="progress mb-2" style="height: 12px;">';
-                                                    echo '<div class="progress-bar" role="progressbar" style="width: ' . $progressPercent . '%; background: linear-gradient(90deg, #667eea, #764ba2);" aria-valuenow="' . $progressPercent . '" aria-valuemin="0" aria-valuemax="100"></div>';
-                                                    echo '</div>';
-                                                    echo '<div class="d-flex justify-content-between small text-muted">';
-                                                    echo '<span>Đã mua: ' . number_format($weeklyPurchase, 0, ',', '.') . 'đ</span>';
-                                                    echo '<span>Mục tiêu: 5.000.000đ</span>';
-                                                    echo '</div>';
+                                                    echo '<p class="mb-0 small">Điểm thành viên và ưu đãi được quản lý độc lập với mức độ quan tâm mua hàng.</p>';
                                                 }
 
                                                 echo '</div>';
@@ -423,12 +471,61 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
                                             } else {
                                                 echo '<a href="index.php" class="btn btn-dark btn-block btn-lg" data-mdb-ripple-color="dark">Thêm sản phẩm để mua hàng</a>';
                                             }
+                                        } elseif (!empty($_SESSION['cart'])) {
+                                            // Guest checkout: CheckOut.php asks for name, phone and delivery address.
+                                            echo '<div class="d-grid gap-2" id="paymentButtons">';
+                                            echo '<button onclick="processPayment(\'cod\')" class="btn btn-dark btn-lg">Đặt hàng (COD)</button>';
+                                            echo '<a href="Login.php" class="btn btn-outline-dark">Đăng nhập để mua hàng</a>';
+                                            echo '</div>';
                                         } else {
-                                            echo '<a href="Login.php" class="btn btn-dark btn-block btn-lg" data-mdb-ripple-color="dark">Đăng nhập để mua hàng</a>';
+                                            echo '<a href="index.php" class="btn btn-dark btn-block btn-lg" data-mdb-ripple-color="dark">Thêm sản phẩm để mua hàng</a>';
                                         }
                                         ?>
                                         
                                         <script>
+                                        const voucherCsrfToken = <?php echo json_encode(csrf_token()); ?>;
+
+                                        async function updateVoucher(action) {
+                                            const input = document.getElementById('voucherCode');
+                                            const message = document.getElementById('voucherMessage');
+                                            const body = new URLSearchParams({
+                                                csrf_token: voucherCsrfToken,
+                                                action: action,
+                                                code: input ? input.value.trim().toUpperCase() : ''
+                                            });
+                                            if (message) {
+                                                message.className = 'd-block mt-2 text-muted';
+                                                message.textContent = 'Đang kiểm tra...';
+                                            }
+                                            try {
+                                                const response = await fetch('../Processing/Voucher_Validate.php', {
+                                                    method: 'POST',
+                                                    headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+                                                    body: body.toString()
+                                                });
+                                                const data = await response.json();
+                                                if (!response.ok || !data.ok) {
+                                                    throw new Error(data.message || 'Mã giảm giá không hợp lệ.');
+                                                }
+                                                window.location.reload();
+                                            } catch (error) {
+                                                if (message) {
+                                                    message.className = 'd-block mt-2 text-danger';
+                                                    message.textContent = error.message;
+                                                }
+                                            }
+                                        }
+
+                                        function applyVoucher() { updateVoucher('apply'); }
+                                        function removeVoucher() { updateVoucher('remove'); }
+                                        document.querySelectorAll('.claimed-voucher-button').forEach((button) => {
+                                            button.addEventListener('click', () => {
+                                                const input = document.getElementById('voucherCode');
+                                                if (input) input.value = button.dataset.voucherCode || '';
+                                                applyVoucher();
+                                            });
+                                        });
+
                                         function updatePaymentButtons() {
                                             const method = document.getElementById('paymentMethod').value;
                                             const buttonsDiv = document.getElementById('paymentButtons');
@@ -444,15 +541,17 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
                                         }
                                         
                                         function processPayment(method) {
+                                            const region = document.getElementById('shippingRegion')?.value || '';
+                                            if (!region) { alert('Vui lòng chọn khu vực giao hàng.'); return; }
                                             if (method === 'balance') {
                                                 // Process balance payment directly from cart
-                                                var shippingFee = <?php echo $shipping_fee; ?>;
                                                 $.ajax({
                                                     type: 'POST',
                                                     url: '../Processing/XuLy_DonHang_Balance.php',
                                                     data: {
+                                                        csrf_token: <?php require_once dirname(__DIR__, 3) . '/config/security.php'; echo json_encode(csrf_token()); ?>,
                                                         pay_by_balance: '1',
-                                                        shipping_fee: shippingFee
+                                                        ShippingRegion: region,
                                                     },
                                                     success: function(response) {
                                                         response = response.trim();
@@ -497,11 +596,26 @@ if (isset($_GET['CapNhatSoLuong']) && isset($_GET['IDCapNhatSoLuong'])) {
                                                     }
                                                 });
                                             } else if (method === 'cod') {
-                                                window.location.href = 'CheckOut.php';
+                                                window.location.href = 'CheckOut.php?shipping_region=' + encodeURIComponent(region);
                                             } else if (method === 'qr') {
-                                                window.location.href = 'CheckOut_QR.php';
+                                                window.location.href = 'CheckOut_QR.php?shipping_region=' + encodeURIComponent(region);
                                             }
                                         }
+
+                                        async function refreshShippingQuote() {
+                                            const region=document.getElementById('shippingRegion')?.value||'';
+                                            if(!region)return;
+                                            const response=await fetch('../Processing/Shipping_Quote.php',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf_token:<?php echo json_encode(csrf_token()); ?>,region_code:region})});
+                                            const data=await response.json();
+                                            if(!response.ok||!data.success){alert(data.message||'Không thể tính phí vận chuyển.');return;}
+                                            document.getElementById('shippingFeeDisplay').textContent=data.quote.fee===0?'Miễn phí':new Intl.NumberFormat('vi-VN').format(data.quote.fee)+' đ';
+                                            document.getElementById('checkoutTotalDisplay').textContent=new Intl.NumberFormat('vi-VN').format(data.quote.total)+' đ';
+                                            const hint=document.getElementById('freeShippingHint');
+                                            const freeMin=data.quote.free_shipping_min;
+                                            if(hint){hint.textContent=freeMin&&data.quote.fee>0?'Mua thêm '+new Intl.NumberFormat('vi-VN').format(freeMin-data.quote.subtotal)+' đ để được miễn phí vận chuyển':'';}
+                                        }
+                                        // A single active region (the default nationwide rate) is preselected: quote it right away.
+                                        document.addEventListener('DOMContentLoaded',()=>{if(document.getElementById('shippingRegion')?.value)refreshShippingQuote();});
                                         </script>
 
                                     </div>

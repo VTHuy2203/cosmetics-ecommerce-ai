@@ -24,7 +24,126 @@ $result = mysqli_query($conn, $sql);
 if (!$result) {
 	die("Có lỗi xảy ra: " . mysqli_error($conn));
 }
+
+function all_orders_h($value): string
+{
+	return htmlspecialchars((string) ($value ?? ''), ENT_QUOTES, 'UTF-8');
+}
+
+$order_count = mysqli_num_rows($result);
 ?>
+
+<style>
+	.orders-page-heading {
+		display: flex;
+		align-items: flex-end;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-bottom: 1rem;
+	}
+
+	.orders-page-heading p {
+		margin: .3rem 0 0;
+		font-size: .88rem;
+	}
+
+	.orders-count {
+		white-space: nowrap;
+		font-size: .82rem;
+		font-weight: 600;
+	}
+
+	.orders-table {
+		min-width: 1320px;
+		table-layout: fixed;
+		margin-bottom: 0;
+	}
+
+	.orders-table thead th {
+		background: #f8fafc;
+		border-bottom-width: 2px;
+		color: #4a5568;
+		font-size: .76rem;
+		font-weight: 700;
+		letter-spacing: .025em;
+		text-transform: uppercase;
+		vertical-align: middle;
+		white-space: nowrap;
+	}
+
+	.orders-table tbody td {
+		padding: .65rem .55rem;
+		color: #5a6275;
+		font-size: .84rem;
+		line-height: 1.45;
+		vertical-align: middle;
+	}
+
+	.orders-table tbody tr:nth-child(even) {
+		background: #fbfcfe;
+	}
+
+	.orders-table tbody tr:hover {
+		background: #f2f8f8;
+	}
+
+	.orders-table th:nth-child(1) { width: 55px; }
+	.orders-table th:nth-child(2) { width: 155px; }
+	.orders-table th:nth-child(3) { width: 90px; }
+	.orders-table th:nth-child(4) { width: 125px; }
+	.orders-table th:nth-child(5) { width: 125px; }
+	.orders-table th:nth-child(6) { width: 115px; }
+	.orders-table th:nth-child(7) { width: 110px; }
+	.orders-table th:nth-child(8) { width: 300px; }
+	.orders-table th:nth-child(9) { width: 115px; }
+	.orders-table th:nth-child(10) { width: 190px; }
+
+	.orders-table form {
+		margin: 0;
+	}
+
+	.orders-table .btn {
+		border-radius: .4rem;
+		font-size: .78rem;
+		line-height: 1.25;
+		padding: .42rem .55rem;
+		white-space: normal;
+	}
+
+	.orders-table .badge {
+		display: inline-block;
+		font-size: .72rem;
+		line-height: 1.3;
+		padding: .35rem .48rem;
+		white-space: normal;
+	}
+
+	.order-summary,
+	.order-address {
+		display: -webkit-box;
+		overflow: hidden;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+	}
+
+	.order-money {
+		color: #2d3748;
+		font-weight: 700;
+		white-space: nowrap;
+	}
+
+	.order-customer {
+		color: #2d3748;
+		font-weight: 600;
+	}
+
+	@media (max-width: 767.98px) {
+		.orders-page-heading {
+			align-items: flex-start;
+			flex-direction: column;
+		}
+	}
+</style>
 
 <body id="page-top">
 	<!-- Page Wrapper -->
@@ -48,25 +167,31 @@ if (!$result) {
 				<div class="container-fluid">
 
 					<!-- Page Heading -->
-					<h1 class="h3 mb-2 text-gray-800">Tất Cả Đơn Hàng</h1>
+					<div class="orders-page-heading">
+						<div>
+							<h1 class="h3 mb-0 text-gray-800">Tất Cả Đơn Hàng</h1>
+							<p class="text-muted">Theo dõi trạng thái, thanh toán và xử lý đơn hàng.</p>
+						</div>
+						<span class="badge badge-light border orders-count"><?php echo number_format($order_count, 0, ',', '.'); ?> đơn hàng</span>
+					</div>
 
 					<!-- DataTales Example -->
 					<div class="card shadow mb-4">
 						<div class="card-body">
 							<div class="table-responsive">
-								<table class="table table-bordered" id="dataTable" width="100%" cellspacing="0">
+								<table class="table table-bordered orders-table" id="dataTable" width="100%" cellspacing="0">
 									<thead>
 										<tr>
-											<th>STT</th>
-											<th>Trạng Thái</th>
-											<th>Xem Chi Tiết</th>
-											<th>Hủy Đơn</th>
-											<th>Thanh Toán</th>
-											<th>Tên Khách Hàng</th>
-											<th>SDT</th>
-											<th>Ghi Chú</th>
-											<th>Tổng Tiền</th>
-											<th>Địa Chỉ</th>
+											<th scope="col">STT</th>
+											<th scope="col">Trạng thái</th>
+											<th scope="col">Chi tiết</th>
+											<th scope="col">Thao tác</th>
+											<th scope="col">Thanh toán</th>
+											<th scope="col">Khách hàng</th>
+											<th scope="col">SĐT</th>
+											<th scope="col">Thông tin đơn</th>
+											<th scope="col">Tổng tiền</th>
+											<th scope="col">Địa chỉ</th>
 										</tr>
 									</thead>
 									<tbody>
@@ -85,45 +210,45 @@ if (!$result) {
 											$returned_to_shop = (stripos($ghi_chu, '[ĐÃ TRẢ VỀ CỬA HÀNG]') !== false);
 											
 											echo '<tr>';
-											echo ' <td>' . $stt . '</td>';
+											echo ' <td class="text-center">' . $stt . '</td>';
 											
 											// Check if order is canceled or customer refused
 											if ($row['TrangThai'] == -1 || $is_canceled) {
 												if ($is_customer_refused) {
-													echo ' <td class="text-center"><span class="badge bg-danger">Đơn đã bị hủy (Khách từ chối)</span></td>';
+													echo ' <td class="text-center"><span class="badge badge-danger">Đơn đã bị hủy (Khách từ chối)</span></td>';
 												} else {
-													echo ' <td class="text-center"><span class="badge bg-danger">Đơn đã bị hủy</span></td>';
+													echo ' <td class="text-center"><span class="badge badge-danger">Đơn đã bị hủy</span></td>';
 												}
 											} else if ($row['TrangThai'] == 0) {
 												// Staff (via admin login), Admin, and Manager can approve orders
 												if ($is_admin_or_manager || $is_staff_via_admin) {
-													echo ' <td class="text-center"> <a href="Approve_Oders.php?oder_id='.$row['ID_DonHang'].'&approve=all" class="btn btn-danger">Cần Duyệt</a>' . '</td>';
+											echo '<td class="text-center">' . admin_order_transition_form((int) $row['ID_DonHang'], 'approve', 'Duyệt', 'btn-danger', 'all') . '</td>';
 												} else {
 													echo ' <td class="text-center"><span class="text-muted">Cần Duyệt</span></td>';
 												}
 											} else if ($row['TrangThai'] == 1) {
 												// Only Admin/Manager can prepare orders (not staff)
 												if ($is_admin_or_manager) {
-													echo ' <td class="text-center"> <a href="Prepare_Oders.php?oder_id='.$row['ID_DonHang'].'&prepare=all" class="btn btn-info">Chuẩn Bị</a>' . '</td>';
+											echo '<td class="text-center">' . admin_order_transition_form((int) $row['ID_DonHang'], 'prepare', 'Chuẩn bị', 'btn-info', 'all') . '</td>';
 												} else {
 													echo ' <td class="text-center"><span class="text-muted">Chuẩn Bị</span></td>';
 												}
 											} else if ($row['TrangThai'] == 2) {
 												// Check if customer refused - don't show "Out for Delivery" if refused
 												if ($is_customer_refused) {
-													echo ' <td class="text-center"><span class="badge bg-danger">Đơn đã bị hủy (Khách từ chối)</span></td>';
+													echo ' <td class="text-center"><span class="badge badge-danger">Đơn đã bị hủy (Khách từ chối)</span></td>';
 												} else {
 													// Only Admin/Manager can mark as shipping (not staff)
 													if ($is_admin_or_manager) {
-														echo ' <td class="text-center"> <a href="Shipping_Oders.php?oder_id='.$row['ID_DonHang'].'&shipping=all" class="btn btn-warning">Đang Giao</a>' . '</td>';
+												echo '<td class="text-center">' . admin_order_transition_form((int) $row['ID_DonHang'], 'shipping', 'Hoàn tất giao', 'btn-warning', 'all') . '</td>';
 													} else {
 														echo ' <td class="text-center"><span class="text-muted">Đang Giao</span></td>';
 													}
 												}
 											} else if ($row['TrangThai'] == 3) {
-												echo ' <td class="text-center"> <a class="btn btn-success">Giao Thành Công</a>' . '</td>';
+											echo ' <td class="text-center"><span class="badge badge-success">Giao thành công</span></td>';
 											}
-											echo ' <td class="text-center"> <a href="View_Oder_Detail.php?oder_id='.$row['ID_DonHang'].'&view=all" class="btn btn-primary">Xem Chi Tiết</a>' . '</td>';
+											echo ' <td class="text-center"><a href="View_Oder_Detail.php?oder_id=' . (int) $row['ID_DonHang'] . '&view=all" class="btn btn-sm btn-primary"><i class="fas fa-eye mr-1"></i>Chi tiết</a></td>';
 											
 											// Show action buttons based on role and order status
 											echo ' <td class="text-center">';
@@ -131,11 +256,10 @@ if (!$result) {
 											// If customer refused, show "Returned to Shop" buttons for Staff/Admin
 											if ($is_customer_refused) {
 												if ($is_admin_or_manager || $is_staff_via_admin) {
-													if (!$returned_to_shop) {
-														echo ' <a href="Staff_Canceled_Orders.php?mark_returned='.$row['ID_DonHang'].'&status=returned" class="btn btn-sm btn-success mb-1" onclick="return confirm(\'Xác nhận shipper đã trả hàng về cửa hàng?\');"><i class="fas fa-check-circle"></i> Đã hoàn về shop</a><br>';
-														echo ' <a href="Staff_Canceled_Orders.php?mark_returned='.$row['ID_DonHang'].'&status=not_returned" class="btn btn-sm btn-warning" onclick="return confirm(\'Xác nhận hàng chưa được trả về cửa hàng?\');"><i class="fas fa-times-circle"></i> Chưa hoàn về shop</a>';
+												if (!$returned_to_shop) {
+														echo '<form method="post" action="Staff_Canceled_Orders.php" class="d-inline" onsubmit="return confirm(\'Xác nhận shipper đã trả hàng về cửa hàng?\');">' . csrf_field() . '<input type="hidden" name="mark_returned" value="' . (int) $row['ID_DonHang'] . '"><input type="hidden" name="status" value="returned"><button type="submit" class="btn btn-sm btn-success mb-1"><i class="fas fa-check-circle"></i> Đã hoàn về shop</button></form>';
 													} else {
-														echo ' <span class="badge bg-success">Đã hoàn về shop</span>';
+															echo ' <span class="badge badge-success">Đã hoàn về shop</span>';
 														// Don't show "Not Yet Returned" button when already returned
 													}
 												} else {
@@ -144,19 +268,32 @@ if (!$result) {
 											} else {
 												// Only Admin/Manager can cancel orders (not staff)
 												if ($is_admin_or_manager) {
-													echo ' <a href="Delete_Oder.php?del_oder_id='.$row['ID_DonHang'].'&view=all" class="btn btn-danger" onclick="return confirm(\'Bạn có chắc chắn muốn hủy đơn hàng #'.$row['ID_DonHang'].'? Hành động này không thể hoàn tác.\');">Hủy</a>';
+											echo admin_cancel_order_form((int) $row['ID_DonHang'], 'all');
 												} else {
 													echo ' <span class="text-muted">-</span>';
 												}
 											}
 											echo '</td>';
 											$paid = isset($row['DaThanhToan']) && intval($row['DaThanhToan'])==1;
-											echo ' <td class="text-center">' . ($paid ? '<span class="badge badge-success">Đã thanh toán</span>' : '<a href="Mark_Paid.php?oder_id='.$row['ID_DonHang'].'" class="btn btn-outline-success">Đánh dấu đã thanh toán</a>') . '</td>';
-											echo ' <td>' . $row['HoVaTen'] . '</td>';
-											echo ' <td>' . $row['SDT'] . '</td>';
-											echo ' <td>' . $row['GhiChu'] . '</td>';
-											echo ' <td>' . $row['TongTien'] . '</td>';
-											echo ' <td>' . $row['DiaChi'] . '</td>';
+											$paymentMethod = (string) ($row['PhuongThucThanhToan'] ?? 'cod');
+											$paymentStatus = (string) ($row['TrangThaiThanhToan'] ?? '');
+											$paymentNotExpired = empty($row['HanThanhToan']) || strtotime((string) $row['HanThanhToan']) >= time();
+											$canConfirmPayment = ($paymentMethod === 'cod' && (int) $row['TrangThai'] === 3)
+												|| ($paymentMethod === 'qr' && (int) $row['TrangThai'] === 0 && $paymentStatus === 'pending' && $paymentNotExpired);
+											echo '<td class="text-center">' . ($paid
+												? '<span class="badge badge-success">Đã thanh toán</span>'
+												: ($canConfirmPayment ? admin_mark_paid_form((int) $row['ID_DonHang']) : '<span class="badge badge-warning">Chưa thanh toán</span>')) . '</td>';
+											$customer_name = trim((string) ($row['HoVaTen'] ?? ''));
+											$phone = trim((string) ($row['SDT'] ?? ''));
+											$note = trim((string) ($row['GhiChu'] ?? ''));
+											$address = trim((string) ($row['DiaChi'] ?? ''));
+											$total = (float) ($row['TongTien'] ?? 0);
+
+											echo ' <td><span class="order-customer">' . all_orders_h($customer_name !== '' ? $customer_name : '—') . '</span></td>';
+											echo ' <td class="text-nowrap">' . all_orders_h($phone !== '' ? $phone : '—') . '</td>';
+											echo ' <td><div class="order-summary" title="' . all_orders_h($note) . '">' . all_orders_h($note !== '' ? $note : 'Không có ghi chú') . '</div></td>';
+											echo ' <td><span class="order-money">' . number_format($total, 0, ',', '.') . ' đ</span></td>';
+											echo ' <td><div class="order-address" title="' . all_orders_h($address) . '">' . all_orders_h($address !== '' ? $address : '—') . '</div></td>';
 											echo '</tr>';
 											$stt++;
 										}

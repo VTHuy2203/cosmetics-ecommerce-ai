@@ -4,10 +4,7 @@
  * Allows employees to export customer data (read-only)
  */
 
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
 // Check if user is logged in and is an employee
 if (!isset($_SESSION['user']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'employee') {
@@ -27,24 +24,7 @@ if (!$employee_check || mysqli_num_rows($employee_check) == 0) {
 header('Content-Type: text/csv; charset=utf-8');
 header('Content-Disposition: attachment; filename="customers_export_' . date('Y-m-d_His') . '.csv"');
 
-// Create PDO connection for advanced queries
-$DEFAULTS = [
-    "DB_HOST" => "127.0.0.1",
-    "DB_NAME" => "webmipham1",
-    "DB_USER" => "root",
-    "DB_PASS" => "",
-    "DB_CHARSET" => "utf8mb4",
-];
-
-function pdo_connect($cfg) {
-    $dsn = "mysql:host={$cfg['DB_HOST']};dbname={$cfg['DB_NAME']};charset={$cfg['DB_CHARSET']}";
-    return new PDO($dsn, $cfg['DB_USER'], $cfg['DB_PASS'], [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
-}
-
-$pdo = pdo_connect($DEFAULTS);
+$pdo = app_pdo();
 
 // Get filter from query string
 $lead_filter = isset($_GET['lead']) ? trim($_GET['lead']) : '';
@@ -66,7 +46,7 @@ fputcsv($out, [
     'Role',
     'Lead Label',
     'Lead Score',
-    'Lead Probability (%)',
+    'Spam Risk (0-100)',
     'Sản Phẩm Quan Tâm',
     'Nhu Cầu Gần Nhất',
     'Lần Tương Tác Cuối',
@@ -77,10 +57,10 @@ fputcsv($out, [
     'Tin Nhắn Chat (Bot)',
     'Session ID',
     'Ghi Chú'
-], ',');
+], ',', '"', '');
 
 // Get all customers (excluding admin and manager)
-$users_sql = "SELECT * FROM khachhang WHERE Role != 'admin' AND Role != 'manager' ORDER BY ID_KhachHang DESC";
+$users_sql = "SELECT * FROM khachhang WHERE Role = 'customer' OR Role IS NULL ORDER BY ID_KhachHang DESC";
 $users_result = mysqli_query($conn, $users_sql);
 
 while ($user = mysqli_fetch_assoc($users_result)) {
@@ -102,20 +82,18 @@ while ($user = mysqli_fetch_assoc($users_result)) {
     $session_id = '';
     
     try {
-        // Get latest customer analysis
-        $caStmt = $pdo->prepare("SELECT label, product_interest, last_need, has_appointment, updated_at, session_id 
-                                 FROM customer_analysis 
-                                 WHERE user_id = ? 
-                                 ORDER BY updated_at DESC 
-                                 LIMIT 1");
+        $caStmt = $pdo->prepare("SELECT sc.segment AS label,sc.intent_score,sc.spam_risk_score,sc.calculated_at AS updated_at,
+                                        ca.product_interest,ca.last_need,ca.has_appointment,ca.session_id
+                                 FROM customer_scores_current sc
+                                 LEFT JOIN customer_analysis ca ON ca.id=(SELECT ca2.id FROM customer_analysis ca2 WHERE ca2.user_id=sc.user_id ORDER BY ca2.updated_at DESC,ca2.id DESC LIMIT 1)
+                                 WHERE sc.user_id=? LIMIT 1");
         $caStmt->execute([$user_id]);
         $ca = $caStmt->fetch();
         
         if ($ca) {
-            $label = $ca['label'] ?? 'spam';
-            $lead_label = $label === 'potential' ? 'Potential' : ($label === 'follow-up' ? 'Neutral' : 'Spam');
-            $lead_score = $label === 'potential' ? 90 : ($label === 'follow-up' ? 50 : 30);
-            $lead_prob = $lead_score;
+            $lead_label = $ca['label'] ?? 'normal';
+            $lead_score = (int) ($ca['intent_score'] ?? 0);
+            $lead_prob = (int) ($ca['spam_risk_score'] ?? 0);
             $product_interest = $ca['product_interest'] ?? '';
             $last_need = $ca['last_need'] ?? '';
             $has_appointment = ($ca['has_appointment'] ?? 0) ? 'Có' : 'Không';
@@ -151,7 +129,7 @@ while ($user = mysqli_fetch_assoc($users_result)) {
     
     // Get chat messages
     try {
-        $chatStmt = $pdo->prepare("SELECT message, is_bot FROM chat_messages 
+        $chatStmt = $pdo->prepare("SELECT message, direction FROM chat_messages 
                                    WHERE user_id = ? 
                                    ORDER BY created_at DESC 
                                    LIMIT 50");
@@ -159,7 +137,7 @@ while ($user = mysqli_fetch_assoc($users_result)) {
         $user_msgs = [];
         $bot_msgs = [];
         while ($msg = $chatStmt->fetch()) {
-            if ($msg['is_bot']) {
+            if ($msg['direction'] === 'bot') {
                 $bot_msgs[] = $msg['message'];
             } else {
                 $user_msgs[] = $msg['message'];
@@ -173,12 +151,7 @@ while ($user = mysqli_fetch_assoc($users_result)) {
     
     // Apply lead filter
     if ($lead_filter !== '') {
-        $filter_map = [
-            'potential' => 'Potential',
-            'neutral' => 'Neutral',
-            'spam' => 'Spam'
-        ];
-        if (isset($filter_map[$lead_filter]) && $lead_label !== $filter_map[$lead_filter]) {
+        if (in_array($lead_filter, ['normal','follow-up','potential','spam'], true) && $lead_label !== $lead_filter) {
             continue; // Skip this customer
         }
     }
@@ -206,7 +179,7 @@ while ($user = mysqli_fetch_assoc($users_result)) {
         $bot_messages,
         $session_id,
         '' // Ghi chú - empty for employees
-    ], ',');
+    ], ',', '"', '');
 }
 
 fclose($out);

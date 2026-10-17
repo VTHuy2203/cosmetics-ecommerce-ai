@@ -1,9 +1,6 @@
 <?php
 // Export_Bookings_CSV.php - Export consultation bookings to CSV
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once dirname(__DIR__, 3) . '/config/security.php';
 $is_admin = isset($_SESSION['admin_is_admin']) && $_SESSION['admin_is_admin'] === true;
 if (!$is_admin) {
     header('HTTP/1.1 403 Forbidden');
@@ -11,11 +8,7 @@ if (!$is_admin) {
 }
 
 function pdo_connect_chat() {
-    $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-    return new PDO($dsn, "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    return app_pdo();
 }
 
 $pdo = pdo_connect_chat();
@@ -34,7 +27,7 @@ header('Content-Disposition: attachment; filename="consultation_bookings_' . dat
 echo "\xEF\xBB\xBF";
 
 $output = fopen('php://output', 'w');
-fputcsv($output, ['ID','User ID','Session ID','Customer Name','Email','Phone','Appointment Time','Message Content','Message Sent At','Note','Created At'], ',');
+fputcsv($output, ['ID','User ID','Session ID','Customer Name','Email','Phone','Appointment Time','Message Content','Message Sent At','Note','Created At'], ',', '"', '');
 
 while ($row = $stmt->fetch()) {
     fputcsv($output, [
@@ -42,7 +35,7 @@ while ($row = $stmt->fetch()) {
         $row['HoVaTen'] ?: 'Khách vãng lai', $row['Email'] ?: '', $row['SDT'] ?: '',
         $row['appt_at'], $row['message_content'] ?: '', $row['message_sent_at'] ?: '',
         $row['note'] ?: '', $row['created_at']
-    ], ',');
+    ], ',', '"', '');
 }
 
 fclose($output);

@@ -7,10 +7,24 @@ if (!isset($_SESSION['user'])) {
     exit();
 }
 
-// Get user info
-$sql_inf_user = "SELECT * FROM khachhang WHERE TenDangNhap = '" . $_SESSION['user'] . "'";
-$result_user = mysqli_query($conn, $sql_inf_user);
-$row_user = mysqli_fetch_array($result_user);
+// Get user info without interpolating session data into SQL.
+$userStmt = $conn->prepare('SELECT * FROM khachhang WHERE TenDangNhap = ? LIMIT 1');
+$username = (string) $_SESSION['user'];
+$userStmt->bind_param('s', $username);
+$userStmt->execute();
+$row_user = $userStmt->get_result()->fetch_assoc();
+if (!$row_user) {
+    unset(
+        $_SESSION['user'],
+        $_SESSION['IDNguoiDung'],
+        $_SESSION['user_role'],
+        $_SESSION['is_admin'],
+        $_SESSION['HoTen'],
+        $_SESSION['TenNguoiDung']
+    );
+    header('Location: Login.php');
+    exit();
+}
 $idKH = $row_user['ID_KhachHang'];
 
 // Get order ID from query string
@@ -32,74 +46,23 @@ if (!$result_order || mysqli_num_rows($result_order) == 0) {
 
 $order = mysqli_fetch_array($result_order);
 
-// Create return_refund_requests table if it doesn't exist
-$create_table = "CREATE TABLE IF NOT EXISTS `return_refund_requests` (
-    `ID_Request` INT AUTO_INCREMENT PRIMARY KEY,
-    `ID_DonHang` INT NOT NULL,
-    `ID_KhachHang` INT NOT NULL,
-    `ID_SanPham` INT NOT NULL,
-    `ContactName` VARCHAR(255) NOT NULL,
-    `ContactPhone` VARCHAR(20) NOT NULL,
-    `ContactEmail` VARCHAR(255) NOT NULL,
-    `ContactAddress` TEXT NOT NULL,
-    `RefundReason` TEXT NOT NULL,
-    `Attachments` TEXT NULL,
-    `TrangThai` ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
-    `ThoiGianTao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    `ThoiGianCapNhat` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_order (ID_DonHang),
-    INDEX idx_customer (ID_KhachHang),
-    INDEX idx_status (TrangThai)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-mysqli_query($conn, $create_table);
-
-// Get order products
-$sql_products = "SELECT dct.*, sp.TenSanPham, sp.IDSanPham 
-                 FROM donhangchitiet dct 
-                 INNER JOIN sanpham sp ON dct.ID_SanPham = sp.IDSanPham 
-                 WHERE dct.ID_DonHang = $order_id";
-$result_products = mysqli_query($conn, $sql_products);
-
-// Check if return/refund request already exists for this order (pending or approved)
-$sql_check_request = "SELECT * FROM return_refund_requests WHERE ID_DonHang = $order_id AND ID_KhachHang = $idKH AND TrangThai != 'rejected'";
-$result_check = mysqli_query($conn, $sql_check_request);
-if ($result_check && mysqli_num_rows($result_check) > 0) {
-    $existing_request = mysqli_fetch_array($result_check);
-    if ($existing_request['TrangThai'] == 'pending') {
-        // Show message that return request is in progress
-        echo '<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Yêu cầu hoàn trả đang xử lý</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="bg-light">
-    <div class="container mt-5">
-        <div class="row justify-content-center">
-            <div class="col-md-6">
-                <div class="card shadow-sm border-0 rounded-4">
-                    <div class="card-body text-center p-5">
-                        <i class="fas fa-clock fa-3x text-warning mb-3"></i>
-                        <h4 class="mb-3">Yêu cầu hoàn trả đang được xử lý</h4>
-                        <p class="text-muted mb-4">Return request is in progress, please wait.</p>
-                        <a href="Order_Tracking.php" class="btn btn-primary">
-                            <i class="fas fa-arrow-left me-2"></i>Quay lại
-                        </a>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-</body>
-</html>';
-        exit();
-    } else {
-        header('Location: Order_Tracking.php?error=request_exists');
-        exit();
-    }
-}
+// Show only quantities that are not already pending or approved. Rejected
+// requests release their quantity for a new request.
+$productStmt = $conn->prepare(
+    "SELECT dct.ID_SanPham AS IDSanPham, sp.TenSanPham, dct.SoLuong,
+            dct.SoLuong - COALESCE(SUM(CASE
+                WHEN r.TrangThai IN ('pending','approved') THEN r.SoLuongYeuCau ELSE 0 END), 0) AS SoLuongConLai
+     FROM donhangchitiet dct
+     INNER JOIN sanpham sp ON dct.ID_SanPham = sp.IDSanPham
+     LEFT JOIN return_refund_requests r
+        ON r.ID_DonHang = dct.ID_DonHang AND r.ID_SanPham = dct.ID_SanPham
+     WHERE dct.ID_DonHang = ?
+     GROUP BY dct.ID_SanPham, sp.TenSanPham, dct.SoLuong
+     HAVING SoLuongConLai > 0"
+);
+$productStmt->bind_param('i', $order_id);
+$productStmt->execute();
+$result_products = $productStmt->get_result();
 ?>
 
 <body class="bg-light">
@@ -124,6 +87,7 @@ if ($result_check && mysqli_num_rows($result_check) > 0) {
                         </div>
                         
                         <form id="returnRefundForm" method="POST" action="../Processing/Submit_Return_Refund_Request.php" enctype="multipart/form-data">
+                            <?php echo csrf_field(); ?>
                             <input type="hidden" name="order_id" value="<?php echo $order_id; ?>">
                             
                             <!-- Contact Information -->
@@ -165,11 +129,15 @@ if ($result_check && mysqli_num_rows($result_check) > 0) {
                                         mysqli_data_seek($result_products, 0);
                                         while ($product = mysqli_fetch_array($result_products)): 
                                         ?>
-                                            <option value="<?php echo $product['IDSanPham']; ?>">
-                                                <?php echo htmlspecialchars($product['TenSanPham']); ?> (Số lượng: <?php echo $product['SoLuong']; ?>)
+                                            <option value="<?php echo (int) $product['IDSanPham']; ?>" data-max="<?php echo (int) $product['SoLuongConLai']; ?>">
+                                                <?php echo htmlspecialchars($product['TenSanPham']); ?> (Có thể hoàn: <?php echo (int) $product['SoLuongConLai']; ?>)
                                             </option>
                                         <?php endwhile; ?>
                                     </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label" for="returnQuantity">Số lượng hoàn <span class="text-danger">*</span></label>
+                                    <input type="number" class="form-control" name="quantity" id="returnQuantity" min="1" value="1" required disabled>
                                 </div>
                             </div>
                             
@@ -191,9 +159,9 @@ if ($result_check && mysqli_num_rows($result_check) > 0) {
                                     <small class="text-muted">Định dạng: JPG, PNG, GIF</small>
                                 </div>
                                 <div class="mb-3">
-                                    <label class="form-label">Video (Tối đa 2 video, mỗi video tối đa 50MB)</label>
+                                    <label class="form-label">Video (Tối đa 2 video, tổng tất cả tệp tối đa 10MB)</label>
                                     <input type="file" class="form-control" name="attachments[]" id="videoFiles" accept="video/*" multiple>
-                                    <small class="text-muted">Định dạng: MP4, AVI, MOV</small>
+                                    <small class="text-muted">Định dạng: MP4, MOV</small>
                                 </div>
                                 <div id="filePreview" class="mt-3"></div>
                             </div>
@@ -246,6 +214,15 @@ if ($result_check && mysqli_num_rows($result_check) > 0) {
         }
         
         // Form validation
+        const productSelect = document.getElementById('productSelect');
+        const returnQuantity = document.getElementById('returnQuantity');
+        productSelect.addEventListener('change', function () {
+            const maximum = Number(this.selectedOptions[0]?.dataset.max || 0);
+            returnQuantity.disabled = maximum < 1;
+            returnQuantity.max = String(maximum);
+            returnQuantity.value = maximum > 0 ? '1' : '';
+        });
+
         document.getElementById('returnRefundForm').addEventListener('submit', function(e) {
             const imageFiles = document.getElementById('imageFiles').files;
             const videoFiles = document.getElementById('videoFiles').files;

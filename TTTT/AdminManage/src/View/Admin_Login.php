@@ -2,8 +2,8 @@
 // Skip admin access check for login page
 $skip_admin_check = true;
 include("../DB_Connect.php");
-// session_start();
-if (session_status() !== PHP_SESSION_ACTIVE) { session_start(); }
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__, 3) . '/config/admin_activity.php';
 
 
 // If already logged in as admin/manager/staff, redirect to appropriate dashboard
@@ -21,27 +21,30 @@ if (isset($_SESSION['admin_role']) && isset($_SESSION['admin_user'])) {
 $error = '';
 
 if (isset($_POST['username']) && isset($_POST['password']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = mysqli_real_escape_string($conn, $_POST['username']);
-    $password = mysqli_real_escape_string($conn, $_POST['password']);
-    
-    // Check if Role column exists
-    $checkCol = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khachhang' AND COLUMN_NAME = 'Role'");
-    $colExists = false;
-    if ($checkCol) {
-        $colRow = mysqli_fetch_assoc($checkCol);
-        $colExists = intval($colRow['c']) > 0;
+    require_csrf();
+    require_turnstile('admin_login');
+    $username = trim((string) $_POST['username']);
+    $plainPassword = (string) $_POST['password'];
+
+    if (!auth_rate_limit('admin-login:' . strtolower($username), 6, 900)) {
+        http_response_code(429);
+        $row = null;
+        $error = 'Bạn đã thử đăng nhập quá nhiều lần. Vui lòng thử lại sau.';
+    } else {
+        $stmt = $conn->prepare("SELECT * FROM khachhang WHERE TenDangNhap = ? AND Role IN ('admin','manager','employee') LIMIT 1");
+        $stmt->bind_param('s', $username);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
     }
-    if (!$colExists) {
-        @mysqli_query($conn, "ALTER TABLE `khachhang` ADD `Role` ENUM('customer','shipper','manager','admin') NOT NULL DEFAULT 'customer' AFTER `DiaChi`");
-    }
-    
-    // Check admin/manager/staff credentials for admin panel access
-    // Allow admin, manager, and employee (staff) roles to login via admin panel
-    $sql_login = "SELECT * FROM khachhang WHERE TenDangNhap = '$username' AND MatKhau = '$password' AND (Role = 'admin' OR Role = 'manager' OR Role = 'employee')";
-    $result = mysqli_query($conn, $sql_login);
-    
-    if ($result && mysqli_num_rows($result) > 0) {
-        $row = mysqli_fetch_array($result);
+
+    if ($row && password_matches_and_upgrade(
+        $conn,
+        (int) $row['ID_KhachHang'],
+        $plainPassword,
+        (string) $row['MatKhau']
+    )) {
+        auth_rate_limit_reset('admin-login:' . strtolower($username));
+        session_regenerate_id(true);
         // Use ADMIN-SPECIFIC session variables to avoid conflicts with User UI
         // This creates a completely separate session from UI login
         $_SESSION['admin_user'] = $row['TenDangNhap'];
@@ -56,6 +59,13 @@ if (isset($_POST['username']) && isset($_POST['password']) && $_SERVER['REQUEST_
             // Staff role - clear any existing admin_is_admin flag
             unset($_SESSION['admin_is_admin']);
         }
+
+        admin_activity_log(
+            $conn,
+            (int) $row['ID_KhachHang'],
+            'login',
+            'Đăng nhập vào trang quản trị.'
+        );
         
         // Redirect staff to staff dashboard, admin/manager to orders
         if ($row['Role'] === 'employee') {
@@ -64,40 +74,7 @@ if (isset($_POST['username']) && isset($_POST['password']) && $_SERVER['REQUEST_
             header("Location: ../Oders/All_Oders.php");
         }
         exit();
-    } else {
-        // If login fails and username is 'admin', try to auto-create admin account
-        if ($username === 'admin' && $password === '123admin') {
-            // Auto-create admin account if it doesn't exist
-            $check_admin = mysqli_query($conn, "SELECT * FROM khachhang WHERE TenDangNhap = 'admin'");
-            if (!$check_admin || mysqli_num_rows($check_admin) == 0) {
-                // Create admin account
-                $insert_sql = "INSERT INTO khachhang (TenDangNhap, MatKhau, HoVaTen, Email, SDT, DiaChi, Role) 
-                               VALUES ('admin', '123admin', 'Administrator', 'admin@moshop.com', '0000000000', 'Admin Office', 'admin')";
-                    if (mysqli_query($conn, $insert_sql)) {
-                        // Retry login
-                        $result = mysqli_query($conn, $sql_login);
-                        if ($result && mysqli_num_rows($result) > 0) {
-                            $row = mysqli_fetch_array($result);
-                            // Use ADMIN-SPECIFIC session variables to avoid conflicts with User UI
-                            $_SESSION['admin_user'] = $row['TenDangNhap'];
-                            $_SESSION['admin_id'] = $row['ID_KhachHang'];
-                            $_SESSION['admin_role'] = $row['Role'];
-                            if ($row['Role'] === 'admin' || $row['Role'] === 'manager') {
-                                $_SESSION['admin_is_admin'] = true;
-                            } else {
-                                unset($_SESSION['admin_is_admin']);
-                            }
-                            
-                            if ($row['Role'] === 'employee') {
-                                header("Location: ../Users/Staff_Dashboard.php");
-                            } else {
-                                header("Location: ../Oders/All_Oders.php");
-                            }
-                            exit();
-                        }
-                    }
-            }
-        }
+    } elseif ($error === '') {
         $error = 'Tên đăng nhập hoặc mật khẩu không đúng!';
     }
 }
@@ -162,6 +139,8 @@ if (isset($_POST['username']) && isset($_POST['password']) && $_SERVER['REQUEST_
             <?php endif; ?>
             
             <form method="POST">
+                <?php echo csrf_field(); ?>
+                <?php echo turnstile_widget('admin_login'); ?>
                 <div class="mb-3">
                     <label for="username" class="form-label">Tên đăng nhập</label>
                     <div class="input-group">
@@ -184,17 +163,8 @@ if (isset($_POST['username']) && isset($_POST['password']) && $_SERVER['REQUEST_
             </form>
             
             <div class="text-center mt-4">
-                <p class="text-muted small mb-2">
-                    <strong>Default Admin Credentials:</strong><br>
-                    Username: <code>admin</code><br>
-                    Password: <code>123admin</code>
-                </p>
-                <a href="../../WebBanHangMyPham/src/View/index.php" class="text-muted text-decoration-none">
+                <a href="/TTTT/WebBanHangMyPham/src/View/index.php" class="text-muted text-decoration-none">
                     <i class="fas fa-arrow-left"></i> Về trang chủ
-                </a>
-                <br>
-                <a href="../Processing/Create_Default_Admin.php" class="text-primary text-decoration-none small">
-                    <i class="fas fa-cog"></i> Create/Reset Admin Account
                 </a>
             </div>
         </div>

@@ -16,30 +16,28 @@ if (!$result) {
 }
 
 //duyệt đơn hàng - Shipper confirms order completion
-if(isset($_GET['oder_id']) && isset($_GET['shipping']))
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && ($_POST['action'] ?? '') === 'shipping')
 {
-    $oder_id = $_GET['oder_id'];
+    require_csrf();
+    $oder_id = (int) ($_POST['order_id'] ?? 0);
     $shipper_id = $_SESSION['admin_id'] ?? $_SESSION['IDNguoiDung'] ?? 0;
     
-    $sql_update_trangthai = "UPDATE `donhang` SET `TrangThai` = '3' WHERE `donhang`.`ID_DonHang` = '$oder_id';";
-
-    $result_update_trangthai = mysqli_query($conn, $sql_update_trangthai);
+    $transition = $conn->prepare(
+        "UPDATE donhang SET TrangThai = 3, GiaoHangLuc = NOW(),
+         DaThanhToan = IF(PhuongThucThanhToan = 'cod', 1, DaThanhToan),
+         TrangThaiThanhToan = IF(PhuongThucThanhToan = 'cod', 'paid', TrangThaiThanhToan),
+         ThanhToanLuc = IF(PhuongThucThanhToan = 'cod', NOW(), ThanhToanLuc),
+         MaThamChieuThanhToan = IF(PhuongThucThanhToan = 'cod', CONCAT('COD-ADMIN-', ID_DonHang, '-', UNIX_TIMESTAMP()), MaThamChieuThanhToan)
+         WHERE ID_DonHang = ? AND TrangThai = 2
+         AND (PhuongThucThanhToan = 'cod' OR TrangThaiThanhToan = 'paid')"
+    );
+    $transition->bind_param('i', $oder_id);
+    $transition->execute();
+    $result_update_trangthai = $transition->affected_rows === 1;
     
     // NOTE: Stock is NOT reduced here - it was already reduced when admin approved the order
     if ($result_update_trangthai) {
         // Create notification for Admin about order completion
-        @mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `admin_notifications` (
-            `id` INT AUTO_INCREMENT PRIMARY KEY,
-            `type` VARCHAR(50) NOT NULL,
-            `message` TEXT NOT NULL,
-            `order_id` INT NULL,
-            `user_id` INT NULL,
-            `is_read` TINYINT(1) NOT NULL DEFAULT 0,
-            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_type (type),
-            INDEX idx_is_read (is_read)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        
         $order_info = mysqli_fetch_array(mysqli_query($conn, "SELECT HoVaTen, TongTien FROM donhang WHERE ID_DonHang = '$oder_id'"));
         $customer_name = $order_info['HoVaTen'] ?? 'N/A';
         $total = $order_info['TongTien'] ?? 0;
@@ -126,7 +124,7 @@ if(isset($_GET['oder_id']) && isset($_GET['shipping']))
         }
     }
 
-    if ($_GET['shipping'] == 'shipping') {
+    if (($_POST['return_to'] ?? '') !== 'all') {
         header('Location: Shipping_Oders.php');
         exit();
     } else {
@@ -184,9 +182,9 @@ if(isset($_GET['oder_id']) && isset($_GET['shipping']))
                                         while ($row = mysqli_fetch_array($result)) {
                                             echo '<tr>';
                                             echo ' <td>' . $stt . '</td>';
-                                            echo ' <td class="text-center"> <a href="Shipping_Oders.php?oder_id='.$row['ID_DonHang'].'&shipping=shipping" class="btn btn-warning">ĐangGiao</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_order_transition_form((int) $row['ID_DonHang'], 'shipping', 'Hoàn tất giao', 'btn-warning', 'shipping') . '</td>';
                                             echo ' <td class="text-center"> <a href="View_Oder_Detail.php?oder_id='.$row['ID_DonHang'].'&view=shipping" class="btn btn-primary">Xem Chi Tiết</a>' . '</td>';
-                                            echo ' <td class="text-center"> <a href="Delete_Oder.php?del_oder_id='.$row['ID_DonHang'].'&view=shipping" class="btn btn-danger">Hủy</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_cancel_order_form((int) $row['ID_DonHang'], 'shipping') . '</td>';
                                             echo ' <td>' . $row['HoVaTen'] . '</td>';
                                             echo ' <td>' . $row['SDT'] . '</td>';
                                             echo ' <td>' . $row['GhiChu'] . '</td>';

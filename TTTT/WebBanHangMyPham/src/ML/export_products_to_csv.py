@@ -1,19 +1,25 @@
 # export_products_to_csv.py
 # Export products from MySQL database to CSV for training prompts generation
 import os
-from dotenv import load_dotenv
 import mysql.connector
 from mysql.connector import Error as MySQLError
 import csv
+from env_loader import load_project_env
 
-load_dotenv()
+load_project_env(__file__)
 
 # ---- ENV ----
-DB_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+def required_env(name):
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required database environment: {name}")
+    return value
+
+DB_HOST = required_env("MYSQL_HOST")
 DB_PORT = int(os.getenv("MYSQL_PORT", "3306"))
-DB_USER = os.getenv("MYSQL_USER", "root")
+DB_USER = required_env("MYSQL_USER")
 DB_PASS = os.getenv("MYSQL_PASSWORD", "")
-DB_NAME = os.getenv("MYSQL_DB", "webmipham1")
+DB_NAME = required_env("MYSQL_DB")
 DB_CHARSET = os.getenv("MYSQL_CHARSET", "utf8mb4")
 
 def get_db():
@@ -44,7 +50,7 @@ def export_to_csv(output_path):
                        dm.TenDanhMuc,
                        sp.IDThuongHieu,
                        th.TenThuongHieu,
-                       COALESCE(sp.Gia, sp.GiaTien) AS GiaTien,
+                       sp.GiaTien AS GiaTien,
                        sp.SoLuong
                 FROM sanpham sp
                 LEFT JOIN danhmuc dm     ON sp.IDDanhMuc = dm.IDDanhMuc
@@ -60,7 +66,7 @@ def export_to_csv(output_path):
                        NULL AS TenDanhMuc,
                        sp.IDThuongHieu,
                        NULL AS TenThuongHieu,
-                       COALESCE(sp.Gia, sp.GiaTien) AS GiaTien,
+                       sp.GiaTien AS GiaTien,
                        sp.SoLuong
                 FROM sanpham sp
                 ORDER BY sp.IDSanPham DESC

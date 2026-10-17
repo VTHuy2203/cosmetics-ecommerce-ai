@@ -2,6 +2,7 @@
     include("../Layouts/headHTML.php");
 
     include("../DB_Connect.php");
+    require_once dirname(__DIR__, 3) . '/config/catalog.php';
 
     $sql = "SELECT * FROM thuonghieu";
 
@@ -34,6 +35,8 @@
                 <!-- Begin Page Content -->
                 <div class="container-fluid">
 
+                    <?php echo catalog_delete_alert(); ?>
+
                     <!-- Page Heading -->
                     <h1 class="h3 mb-2 text-gray-800">Danh Sách Thương Hiệu</h1>
 
@@ -58,7 +61,7 @@
                                             echo '<tr>';
                                             echo ' <td>' . $stt . '</td>';
                                             echo ' <td class="text-center"> <a href="Update_Brand.php?brand_id='.$row['IDThuongHieu'].'" class="btn btn-primary">Sửa</a>' . '</td>';
-                                            echo ' <td class="text-center"> <a href="Delete_Brand.php?brand_id='.$row['IDThuongHieu'].'" class="btn btn-danger">Xóa</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_delete_form('Delete_Brand.php', 'brand_id', (int) $row['IDThuongHieu']) . '</td>';
                                             echo ' <td>' . $row['TenThuongHieu'] . '</td>';
                                             echo ' <td class="text-center">';
                                             echo '     <div class="d-flex align-items-center justify-content-center">';

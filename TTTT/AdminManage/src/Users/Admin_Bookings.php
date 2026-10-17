@@ -9,11 +9,7 @@ $is_admin = isset($_SESSION['admin_is_admin']) && $_SESSION['admin_is_admin'] ==
 
 // Use PDO for chat tables (they use PDO, not mysqli)
 function pdo_connect_chat() {
-    $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-    return new PDO($dsn, "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    return app_pdo();
 }
 
 $pdo = pdo_connect_chat();

@@ -7,11 +7,6 @@
 include("../Layouts/Head.php");
 include("../DB_Connect.php");
 
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
 // Check if user is logged in and is an employee
 if (!isset($_SESSION['user']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'employee') {
     header("Location: Login.php");
@@ -28,11 +23,7 @@ if (!$employee_check || mysqli_num_rows($employee_check) == 0) {
 
 // Use PDO for chat tables
 function pdo_connect_chat() {
-    $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-    return new PDO($dsn, "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    return app_pdo();
 }
 
 $pdo = pdo_connect_chat();
@@ -40,7 +31,7 @@ $pdo = pdo_connect_chat();
 // Get all customers (Fixed: Removed non-existent columns)
 $sql = "SELECT k.*
         FROM khachhang k
-        WHERE k.Role != 'admin' AND k.Role != 'manager'
+        WHERE k.Role = 'customer' OR k.Role IS NULL
         ORDER BY k.ID_KhachHang DESC";
 $result = mysqli_query($conn, $sql);
 if (!$result) {
@@ -52,22 +43,21 @@ $leadMap = [];
 $appointmentsMap = []; // Map customer ID to their appointments
 
 try {
-    // Get customer analysis data
+    // Get canonical current scores and the most recent stated need.
     try {
-        $caStmt = $pdo->query("SELECT user_id, label, has_appointment, product_interest, last_need 
-                               FROM customer_analysis 
-                               WHERE user_id IS NOT NULL 
-                               ORDER BY updated_at DESC");
+        $caStmt = $pdo->query("SELECT sc.user_id,sc.segment AS label,sc.intent_score AS score,
+                                      sc.spam_risk_score,sc.value_tier,ca.product_interest,ca.last_need
+                               FROM customer_scores_current sc
+                               LEFT JOIN customer_analysis ca ON ca.id=(SELECT ca2.id FROM customer_analysis ca2 WHERE ca2.user_id=sc.user_id ORDER BY ca2.updated_at DESC,ca2.id DESC LIMIT 1)
+                               WHERE sc.user_id IS NOT NULL");
         while($ca = $caStmt->fetch()) {
             $uid = (int)$ca['user_id'];
             if (!isset($leadMap[$uid])) {
-                $label = $ca['label'] ?? 'spam';
-                $leadLabel = $label === 'potential' ? 'potential' : ($label === 'follow-up' ? 'neutral' : 'spam');
-                $score = $label === 'potential' ? 90 : ($label === 'follow-up' ? 50 : 30);
                 $leadMap[$uid] = [
-                    'label' => $leadLabel,
-                    'score' => $score,
-                    'probability' => $score / 100.0,
+                    'label' => $ca['label'] ?? 'normal',
+                    'score' => (int) ($ca['score'] ?? 0),
+                    'spam_risk_score' => (int) ($ca['spam_risk_score'] ?? 0),
+                    'value_tier' => $ca['value_tier'] ?? 'new',
                     'last_need' => $ca['last_need'] ?? null,
                     'product_interest' => $ca['product_interest'] ?? null
                 ];
@@ -122,27 +112,6 @@ if (!$result_pending_orders) {
     }
 }
 
-// Ensure return_refund_requests table exists
-$create_table = "CREATE TABLE IF NOT EXISTS `return_refund_requests` (
-    `ID_Request` INT AUTO_INCREMENT PRIMARY KEY,
-    `ID_DonHang` INT NOT NULL,
-    `ID_KhachHang` INT NOT NULL,
-    `ID_SanPham` INT NOT NULL,
-    `ContactName` VARCHAR(255) NOT NULL,
-    `ContactPhone` VARCHAR(20) NOT NULL,
-    `ContactEmail` VARCHAR(255) NOT NULL,
-    `ContactAddress` TEXT NOT NULL,
-    `RefundReason` TEXT NOT NULL,
-    `Attachments` TEXT NULL,
-    `TrangThai` ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
-    `ThoiGianTao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    `ThoiGianCapNhat` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_order (ID_DonHang),
-    INDEX idx_customer (ID_KhachHang),
-    INDEX idx_status (TrangThai)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-mysqli_query($conn, $create_table);
-
 // Get pending return/refund requests count
 $sql_total_return_requests = "SELECT COUNT(*) as total FROM return_refund_requests WHERE TrangThai = 'pending'";
 $result_total_return = mysqli_query($conn, $sql_total_return_requests);
@@ -161,14 +130,13 @@ $totalGuestCustomers = 0;
 try {
     $guestStmt = $pdo->query("
         SELECT gc.*,
-               ca.label,
+               COALESCE(sc.segment, ca.label, 'normal') AS label,
                ca.message_count,
                ca.has_appointment,
-               COUNT(DISTINCT cm.id) as total_messages
+               (SELECT COUNT(*) FROM chat_messages cm WHERE cm.session_id=gc.session_id AND cm.user_id IS NULL) AS total_messages
         FROM guest_customers gc
         LEFT JOIN customer_analysis ca ON gc.session_id = ca.session_id AND ca.user_id IS NULL
-        LEFT JOIN chat_messages cm ON gc.session_id = cm.session_id AND cm.user_id IS NULL
-        GROUP BY gc.id
+        LEFT JOIN customer_scores_current sc ON sc.subject_key = CONCAT('session:', gc.session_id)
         ORDER BY gc.updated_at DESC
         LIMIT 20
     ");
@@ -338,11 +306,12 @@ foreach ($appointmentsMap as $appts) {
                                                 <td><?php echo htmlspecialchars(substr($order['DiaChi'], 0, 50)) . (strlen($order['DiaChi']) > 50 ? '...' : ''); ?></td>
                                                 <td><?php echo isset($order['NgayTao']) ? date('d/m/Y H:i', strtotime($order['NgayTao'])) : 'N/A'; ?></td>
                                                 <td class="text-center">
-                                                    <a href="../Processing/Employee_Approve_Order.php?order_id=<?php echo $order['ID_DonHang']; ?>&approve=1" 
-                                                       class="btn btn-success btn-sm" 
-                                                       onclick="return confirm('Bạn có chắc chắn muốn duyệt đơn hàng này? Đơn hàng sẽ được chuyển sang trạng thái \'Chuẩn Bị\' và Shipper có thể nhận hàng.');">
-                                                        <i class="fas fa-check me-1"></i>Duyệt
-                                                    </a>
+                                                    <form method="post" action="../Processing/Employee_Approve_Order.php"
+                                                          onsubmit="return confirm('Bạn có chắc chắn muốn duyệt đơn hàng này?')">
+                                                        <?php echo csrf_field(); ?>
+                                                        <input type="hidden" name="order_id" value="<?php echo (int) $order['ID_DonHang']; ?>">
+                                                        <button type="submit" class="btn btn-success btn-sm"><i class="fas fa-check me-1"></i>Duyệt</button>
+                                                    </form>
                                                 </td>
                                             </tr>
                                         <?php 
@@ -391,8 +360,8 @@ foreach ($appointmentsMap as $appts) {
                                         $stt_guest = 1;
                                         foreach ($guestCustomers as $guest):
                                             $label = $guest['label'] ?? 'unlabeled';
-                                            $labelColors = ['spam' => 'danger', 'follow-up' => 'warning', 'potential' => 'success', 'unlabeled' => 'secondary'];
-                                            $labelNames = ['spam' => 'Spam', 'follow-up' => 'Theo dõi', 'potential' => 'Tiềm năng', 'unlabeled' => 'Chưa phân loại'];
+                                        $labelColors = ['normal' => 'secondary', 'spam' => 'danger', 'follow-up' => 'warning', 'potential' => 'success', 'unlabeled' => 'secondary'];
+                                        $labelNames = ['normal' => 'Bình thường', 'spam' => 'Spam', 'follow-up' => 'Theo dõi', 'potential' => 'Tiềm năng', 'unlabeled' => 'Chưa phân loại'];
                                         ?>
                                             <tr>
                                                 <td><?php echo $stt_guest++; ?></td>
@@ -438,7 +407,8 @@ foreach ($appointmentsMap as $appts) {
                                     <select id="lead_filter" name="lead" class="form-select form-select-sm d-inline-block" style="width: auto;" onchange="this.form.submit()">
                                         <option value="">Tất cả</option>
                                         <option value="potential" <?php echo ($filterLead === 'potential') ? 'selected' : ''; ?>>Tiềm năng</option>
-                                        <option value="neutral" <?php echo ($filterLead === 'neutral') ? 'selected' : ''; ?>>Trung tính</option>
+                                        <option value="follow-up" <?php echo ($filterLead === 'follow-up') ? 'selected' : ''; ?>>Đang theo dõi</option>
+                                        <option value="normal" <?php echo ($filterLead === 'normal') ? 'selected' : ''; ?>>Bình thường</option>
                                         <option value="spam" <?php echo ($filterLead === 'spam') ? 'selected' : ''; ?>>Spam</option>
                                     </select>
                                 </form>
@@ -474,9 +444,9 @@ foreach ($appointmentsMap as $appts) {
                                         <th>Số Điện Thoại</th>
                                         <th>Email</th>
                                         <th>Địa Chỉ</th>
-                                        <th>Mua tuần</th>
+                                        <th>Điểm lead</th>
                                         <th>Phân loại</th>
-                                        <th>Giảm giá</th>
+                                        <th>Hạng giá trị</th>
                                         <th>Nhu Cầu</th>
                                     </tr>
                                 </thead>
@@ -490,18 +460,13 @@ foreach ($appointmentsMap as $appts) {
                                         // Get new customer classification
                                         $lead = isset($leadMap[$uid]) ? $leadMap[$uid] : null;
                                         
-                                        $customerLabel = 'spam';
+                                        $customerLabel = 'normal';
                                         if ($lead && isset($lead['label'])) {
-                                            if ($lead['label'] === 'neutral') $customerLabel = 'follow-up';
-                                            else $customerLabel = $lead['label'];
+                                            $customerLabel = $lead['label'];
                                         }
 
-                                        $discountPercent = 0;
-                                        $weeklyPurchase = 0;
                                         if ($filterLead !== '') {
-                                            $mappedLabel = $customerLabel === 'potential' ? 'potential' :
-                                                          ($customerLabel === 'follow-up' ? 'neutral' : 'spam');
-                                            if ($mappedLabel !== $filterLead) {
+                                            if ($customerLabel !== $filterLead) {
                                                 continue;
                                             }
                                         }
@@ -514,8 +479,10 @@ foreach ($appointmentsMap as $appts) {
                                             $badge = '<span class="badge" style="background:linear-gradient(135deg,#ffd700 0%,#ffb347 100%);color:#333;">Tiềm năng</span>';
                                         } else if ($customerLabel === 'follow-up') {
                                             $badge = '<span class="badge" style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;">Theo dõi</span>';
-                                        } else {
+                                        } else if ($customerLabel === 'spam') {
                                             $badge = '<span class="badge bg-danger">Spam</span>';
+                                        } else {
+                                            $badge = '<span class="badge bg-secondary">Bình thường</span>';
                                         }
 
                                         // Get last need
@@ -526,16 +493,8 @@ foreach ($appointmentsMap as $appts) {
                                             $need = htmlspecialchars($lead['product_interest']);
                                         }
 
-                                        // Format weekly purchase with highlight for potential
-                                        $purchaseDisplay = number_format($weeklyPurchase, 0, ',', '.') . ' đ';
-                                        if ($customerLabel === 'potential') {
-                                            $purchaseDisplay = '<strong style="color:#28a745;">' . $purchaseDisplay . '</strong>';
-                                        }
-
-                                        // Discount display
-                                        $discountDisplay = $discountPercent > 0 ?
-                                            '<span class="badge bg-success">' . $discountPercent . '%</span>' :
-                                            '<span class="text-muted">0%</span>';
+                                        $purchaseDisplay = (int)($lead['score'] ?? 0) . '/100';
+                                        $discountDisplay = '<span class="badge bg-info text-dark">' . htmlspecialchars((string)($lead['value_tier'] ?? 'new')) . '</span>';
 
                                         echo '<tr' . ($customerLabel === 'potential' ? ' style="background:rgba(255,215,0,0.1);"' : '') . '>';
                                         echo '<td>' . $stt . '</td>';
@@ -889,7 +848,10 @@ foreach ($appointmentsMap as $appts) {
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
                 },
-                body: 'id=' + id
+                body: new URLSearchParams({
+                    id: String(id),
+                    csrf_token: <?php echo json_encode(csrf_token(), JSON_UNESCAPED_SLASHES); ?>
+                }).toString()
             })
             .then(response => response.json())
             .then(data => {

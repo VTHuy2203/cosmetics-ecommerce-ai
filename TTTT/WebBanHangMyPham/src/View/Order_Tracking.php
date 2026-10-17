@@ -481,6 +481,7 @@ if ($result_unrated && mysqli_num_rows($result_unrated) > 0) {
 				url: '../Processing/Cancel_Order.php',
 				type: 'POST',
 				data: {
+					csrf_token: <?php require_once dirname(__DIR__, 3) . '/config/security.php'; echo json_encode(csrf_token()); ?>,
 					order_id: orderId,
 					payment_method: paymentMethod,
 					cancel_reason: reason,

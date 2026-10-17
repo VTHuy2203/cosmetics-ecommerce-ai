@@ -1,5 +1,5 @@
 <?php
-session_start();
+ob_start();
 
 // Increase upload limits
 @ini_set('upload_max_filesize', '20M');
@@ -8,17 +8,8 @@ session_start();
 
 include("../Layouts/headHTML.php");
 include("../DB_Connect.php");
-
-// Create product_images table if not exists
-@mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `product_images` (
-    `ID_HinhAnh` INT AUTO_INCREMENT PRIMARY KEY,
-    `ID_SanPham` INT NOT NULL,
-    `DuongDan` VARCHAR(255) NOT NULL,
-    `ThuTu` INT NOT NULL DEFAULT 0,
-    `ThoiGianTao` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (`ID_SanPham`) REFERENCES `sanpham`(`IDSanPham`) ON DELETE CASCADE,
-    INDEX idx_product (`ID_SanPham`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+require_once dirname(__DIR__, 3) . '/config/uploads.php';
+require_once dirname(__DIR__, 3) . '/config/catalog.php';
 
 if (
     $_SERVER['REQUEST_METHOD'] === 'POST'
@@ -30,24 +21,32 @@ if (
     && isset($_POST['moTaChiTiet'])
     && isset($_FILES['image'])
 ) {
-    $tenSanPham = mysqli_real_escape_string($conn, $_POST['tenSanPham']);
-    $tenDanhMuc = mysqli_real_escape_string($conn, $_POST['tenDanhMuc']);
-    $tenThuongHieu = mysqli_real_escape_string($conn, $_POST['tenThuongHieu']);
-    $soLuonng = mysqli_real_escape_string($conn, $_POST['soLuong']);
-    $giaTien = mysqli_real_escape_string($conn, $_POST['giaTien']);
-    $moTaChiTiet = mysqli_real_escape_string($conn, $_POST['moTaChiTiet']);
+    require_csrf();
+    $tenSanPham = trim((string) $_POST['tenSanPham']);
+    $tenDanhMuc = (int) $_POST['tenDanhMuc'];
+    $tenThuongHieu = (int) $_POST['tenThuongHieu'];
+    $soLuonng = (int) $_POST['soLuong'];
+    $giaTien = (int) $_POST['giaTien'];
+    $moTaChiTiet = (string) $_POST['moTaChiTiet'];
+    if ($tenSanPham === '' || mb_strlen($tenSanPham) > 5000 || $tenDanhMuc < 1 || $tenThuongHieu < 1
+        || $soLuonng < 0 || $soLuonng > 1_000_000 || $giaTien < 0 || $giaTien > 2_000_000_000
+        || mb_strlen($moTaChiTiet) > 10_000) {
+        http_response_code(422);
+        exit('Dữ liệu sản phẩm không hợp lệ.');
+    }
 
     $checkIssetIMG = false;
     $target_file = "";
     
     // Handle main image (first image)
     if (isset($_FILES["image"]) && $_FILES["image"]["error"] === UPLOAD_ERR_OK) {
-        $check = getimagesize($_FILES["image"]["tmp_name"]);
-        if ($check !== false) {
+        try {
             $checkIssetIMG = true;
-            $target_dir = "IMG_Products/";
-            $target_file = $target_dir . basename($_FILES["image"]["name"]);
-            move_uploaded_file($_FILES["image"]["tmp_name"], $target_file);
+            $target_file = 'IMG_Products/' . store_public_image_upload($_FILES['image'], __DIR__ . '/IMG_Products');
+        } catch (Throwable $error) {
+            error_log('Product image upload failed: ' . $error->getMessage());
+            http_response_code(422);
+            exit('Ảnh sản phẩm không hợp lệ.');
         }
     }
 
@@ -55,13 +54,16 @@ if (
         $target_file = "";
     }
 
-    // Insert product
-    $sql = "INSERT INTO `sanpham` (`IDSanPham`, `TenSanPham`, `IDDanhMuc`, `IDThuongHieu`, `SoLuong`, `GiaTien`, `NoiBat`, `MoTaChiTiet`, `AnhSanPham`) 
-            VALUES (null, '$tenSanPham', '$tenDanhMuc', '$tenThuongHieu', '$soLuonng', '$giaTien', '0', '$moTaChiTiet', '$target_file')";
-
-    $result = mysqli_query($conn, $sql);
-
-    if ($result) {
+    // Product and its durable RAG event commit together.
+    $conn->begin_transaction();
+    try {
+    $insertProduct = $conn->prepare(
+        'INSERT INTO sanpham (TenSanPham, IDDanhMuc, IDThuongHieu, SoLuong, GiaTien, NoiBat, MoTaChiTiet, AnhSanPham)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?)'
+    );
+    $insertProduct->bind_param('siiiiss', $tenSanPham, $tenDanhMuc, $tenThuongHieu, $soLuonng, $giaTien, $moTaChiTiet, $target_file);
+    $insertProduct->execute();
+    {
         $product_id = mysqli_insert_id($conn);
         
         // Send WebSocket notification to users about new product
@@ -75,34 +77,36 @@ if (
         
         // Handle multiple images
         if (isset($_FILES['additional_images']) && is_array($_FILES['additional_images']['name'])) {
-            $target_dir = "IMG_Products/";
             $image_order = 1; // Start from 1 (0 is for main image)
-            
-            for ($i = 0; $i < count($_FILES['additional_images']['name']); $i++) {
+            $additionalCount = min(count($_FILES['additional_images']['name']), 8);
+            $insertImage = $conn->prepare('INSERT INTO product_images (ID_SanPham, DuongDan, ThuTu) VALUES (?, ?, ?)');
+            for ($i = 0; $i < $additionalCount; $i++) {
                 if ($_FILES['additional_images']['error'][$i] === UPLOAD_ERR_OK) {
-                    $check = getimagesize($_FILES["additional_images"]["tmp_name"][$i]);
-                    if ($check !== false) {
-                        $file_extension = pathinfo($_FILES["additional_images"]["name"][$i], PATHINFO_EXTENSION);
-                        $new_filename = "product_" . $product_id . "_" . time() . "_" . $i . "." . $file_extension;
-                        $target_file_path = $target_dir . $new_filename;
-                        
-                        if (move_uploaded_file($_FILES["additional_images"]["tmp_name"][$i], $target_file_path)) {
-                            // Insert image into product_images table
-                            $sql_image = "INSERT INTO `product_images` (`ID_SanPham`, `DuongDan`, `ThuTu`) 
-                                         VALUES ('$product_id', '$target_file_path', '$image_order')";
-                            mysqli_query($conn, $sql_image);
-                            $image_order++;
-                        }
-                    }
+                    $file = [
+                        'name' => $_FILES['additional_images']['name'][$i],
+                        'tmp_name' => $_FILES['additional_images']['tmp_name'][$i],
+                        'error' => $_FILES['additional_images']['error'][$i],
+                        'size' => $_FILES['additional_images']['size'][$i],
+                    ];
+                    $target_file_path = 'IMG_Products/' . store_public_image_upload($file, __DIR__ . '/IMG_Products');
+                    $insertImage->bind_param('isi', $product_id, $target_file_path, $image_order);
+                    $insertImage->execute();
+                    $image_order++;
                 }
             }
         }
-        
+        catalog_enqueue_rag_event($conn, $product_id, 'upsert');
+        $conn->commit();
+
         $_SESSION['success_message'] = 'Thêm Sản Phẩm thành công!';
         header("Location: Add_Product.php");
         exit();
-    } else {
-        echo "Có lỗi xảy ra: " . mysqli_error($conn);
+    }
+    } catch (Throwable $error) {
+        try { $conn->rollback(); } catch (Throwable) {}
+        error_log('Product creation failed: ' . $error->getMessage());
+        http_response_code(500);
+        exit('Không thể thêm sản phẩm.');
     }
 }
 ?>
@@ -134,6 +138,7 @@ if (
                     <!-- DataTales Example -->
                     <div class="container-fluid shadow mb-4">
                         <form action="" method="post" enctype="multipart/form-data">
+                            <?php echo csrf_field(); ?>
                             <div class="row">
                                 <?php if (isset($_SESSION['success_message'])) : ?>
                                     <div class="alert alert-success m-4"><?php echo $_SESSION['success_message']; ?></div>
@@ -191,7 +196,7 @@ if (
                                         ClassicEditor
                                             .create(document.querySelector('#moTaChiTiet'), {
                                                 ckfinder: {
-                                                    uploadUrl: 'File_Upload.php'
+                                                    uploadUrl: 'File_Upload.php?csrf_token=<?php echo rawurlencode(csrf_token()); ?>'
                                                 }
                                             })
                                             .then(editor => {

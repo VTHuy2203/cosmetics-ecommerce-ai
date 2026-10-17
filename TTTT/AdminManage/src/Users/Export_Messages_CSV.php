@@ -1,9 +1,6 @@
 <?php
 // Export_Messages_CSV.php - Export customer messages to CSV
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once dirname(__DIR__, 3) . '/config/security.php';
 $is_admin = isset($_SESSION['admin_is_admin']) && $_SESSION['admin_is_admin'] === true;
 if (!$is_admin) {
     header('HTTP/1.1 403 Forbidden');
@@ -11,11 +8,7 @@ if (!$is_admin) {
 }
 
 function pdo_connect_chat() {
-    $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-    return new PDO($dsn, "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    return app_pdo();
 }
 
 $pdo = pdo_connect_chat();
@@ -50,7 +43,7 @@ header('Content-Disposition: attachment; filename="customer_messages_' . date('Y
 echo "\xEF\xBB\xBF";
 
 $output = fopen('php://output', 'w');
-fputcsv($output, ['ID','User ID','Session ID','Customer Name','Email','Phone','Message','Created At','Label','Notes','Labeled At','Has Appointment','Appointment Time'], ',');
+fputcsv($output, ['ID','User ID','Session ID','Customer Name','Email','Phone','Message','Created At','Label','Notes','Labeled At','Has Appointment','Appointment Time'], ',', '"', '');
 
 $label_map = ['not_potential' => 'Không tiềm năng', 'needs_followup' => 'Cần theo dõi', 'potential' => 'Tiềm năng', 'unlabeled' => 'Chưa phân loại'];
 
@@ -61,7 +54,7 @@ while ($row = $stmt->fetch()) {
         $row['message'], $row['created_at'],
         $label_map[$row['label']] ?? $row['label'], $row['notes'] ?: '', $row['labeled_at'] ?: '',
         $row['has_appointment'], $row['appointment_time'] ?: ''
-    ], ',');
+    ], ',', '"', '');
 }
 
 fclose($output);

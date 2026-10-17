@@ -1,68 +1,79 @@
 <?php
-require_once "../DB_Connect.php";
+declare(strict_types=1);
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['product_id'])) {
-    $product_id = $_POST['product_id'];
-    $tenSanPham = $_POST['tenSanPham'];
-    $tenDanhMuc = $_POST['tenDanhMuc'];
-    $tenThuongHieu = $_POST['tenThuongHieu'];
-    
-    // Get current quantity and add quantity to increase
-    $soLuongHienTai = isset($_POST['soLuong']) ? intval($_POST['soLuong']) : 0;
-    $soLuongThem = isset($_POST['soLuongThem']) ? intval($_POST['soLuongThem']) : 0;
-    $soLuong = $soLuongHienTai + $soLuongThem; // Increase quantity
-    
-    $giaTien = $_POST['giaTien'];
-    $moTaChiTiet = $_POST['moTaChiTiet'];
+require_once '../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/uploads.php';
+require_once dirname(__DIR__, 3) . '/config/catalog.php';
+require_once '../Layouts/Admin_Access_Check.php';
 
-    $update_image = false;
-    $target_file = '';
-
-    if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
-        $check = getimagesize($_FILES["image"]["tmp_name"]);
-
-        if ($check !== false) {
-            $update_image = true;
-            $target_dir = "IMG_Products/";
-            $target_file = $target_dir . basename($_FILES["image"]["name"]);
-            move_uploaded_file($_FILES["image"]["tmp_name"], $target_file);
-        }
-    }
-
-    $update_sql = "UPDATE sanpham SET 
-                   TenSanPham=?, 
-                   IDDanhMuc=?, 
-                   IDThuongHieu=?, 
-                   SoLuong=?, 
-                   GiaTien=?, 
-                   MoTaChiTiet=?"
-        . ($update_image ? ", AnhSanPham=?" : "")
-        . " WHERE IDSanPham=?";
-
-    $stmt = $conn->prepare($update_sql);
-
-    if ($update_image) {
-        $stmt->bind_param("sssssssi", $tenSanPham, $tenDanhMuc, $tenThuongHieu, $soLuong, $giaTien, $moTaChiTiet, $target_file, $product_id);
-    } else {
-        $stmt->bind_param("ssssssi", $tenSanPham, $tenDanhMuc, $tenThuongHieu, $soLuong, $giaTien, $moTaChiTiet, $product_id);
-    }
-
-    $stmt->execute();
-    
-    // Send WebSocket notification to users about product update
-    $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-    if (file_exists($wsPushFile)) {
-        require_once($wsPushFile);
-        if (function_exists('websocket_push_product_update')) {
-            websocket_push_product_update($product_id, $tenSanPham, 'update');
-        }
-    }
-    
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
     header('Location: Manage_Product.php');
-    exit();
-} else {
-    header('Location: Manage_Product.php');
-    exit();
+    exit;
+}
+require_csrf();
+
+$productId = (int) ($_POST['product_id'] ?? 0);
+$name = trim((string) ($_POST['tenSanPham'] ?? ''));
+$categoryId = (int) ($_POST['tenDanhMuc'] ?? 0);
+$brandId = (int) ($_POST['tenThuongHieu'] ?? 0);
+$quantityToAdd = (int) ($_POST['soLuongThem'] ?? 0);
+$price = (int) ($_POST['giaTien'] ?? 0);
+$description = (string) ($_POST['moTaChiTiet'] ?? '');
+
+if ($productId < 1 || $categoryId < 1 || $brandId < 1
+    || $name === '' || mb_strlen($name) > 5000
+    || $quantityToAdd < 0 || $quantityToAdd > 1_000_000
+    || $price < 0 || $price > 2_000_000_000
+    || mb_strlen($description) > 10_000) {
+    http_response_code(422);
+    exit('Dữ liệu sản phẩm không hợp lệ.');
 }
 
-mysqli_close($conn);
+$imagePath = null;
+try {
+    $conn->begin_transaction();
+    if (isset($_FILES['image']) && ($_FILES['image']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
+        $fileName = store_public_image_upload($_FILES['image'], __DIR__ . '/IMG_Products');
+        $imagePath = 'IMG_Products/' . $fileName;
+    }
+
+    if ($imagePath !== null) {
+        $statement = $conn->prepare(
+            'UPDATE sanpham SET TenSanPham = ?, IDDanhMuc = ?, IDThuongHieu = ?,
+             SoLuong = SoLuong + ?, GiaTien = ?, MoTaChiTiet = ?, AnhSanPham = ? WHERE IDSanPham = ?'
+        );
+        $statement->bind_param(
+            'siiiissi',
+            $name,
+            $categoryId,
+            $brandId,
+            $quantityToAdd,
+            $price,
+            $description,
+            $imagePath,
+            $productId
+        );
+    } else {
+        $statement = $conn->prepare(
+            'UPDATE sanpham SET TenSanPham = ?, IDDanhMuc = ?, IDThuongHieu = ?,
+             SoLuong = SoLuong + ?, GiaTien = ?, MoTaChiTiet = ? WHERE IDSanPham = ?'
+        );
+        $statement->bind_param('siiiisi', $name, $categoryId, $brandId, $quantityToAdd, $price, $description, $productId);
+    }
+    $statement->execute();
+    $exists = $conn->prepare('SELECT 1 FROM sanpham WHERE IDSanPham = ? LIMIT 1');
+    $exists->bind_param('i', $productId);
+    $exists->execute();
+    if ($exists->get_result()->fetch_row() === null) {
+        throw new RuntimeException('Product does not exist.');
+    }
+    catalog_enqueue_rag_event($conn, $productId, 'upsert');
+    $conn->commit();
+    header('Location: Manage_Product.php?updated=1');
+    exit;
+} catch (Throwable $error) {
+    try { $conn->rollback(); } catch (Throwable) {}
+    error_log('Product update failed: ' . $error->getMessage());
+    http_response_code(500);
+    exit('Không thể cập nhật sản phẩm.');
+}

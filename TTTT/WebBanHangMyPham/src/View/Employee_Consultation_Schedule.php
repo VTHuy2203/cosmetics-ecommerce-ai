@@ -7,11 +7,6 @@
 include("../Layouts/Head.php");
 include("../DB_Connect.php");
 
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
 // Check if user is logged in and is an employee
 if (!isset($_SESSION['user']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'employee') {
     header("Location: Login.php");
@@ -28,11 +23,7 @@ if (!$employee_check || mysqli_num_rows($employee_check) == 0) {
 
 // Use PDO for chat tables
 function pdo_connect_chat() {
-    $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-    return new PDO($dsn, "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    return app_pdo();
 }
 
 $pdo = pdo_connect_chat();
@@ -292,4 +283,3 @@ foreach ($bookings as $b) {
     </script>
 </body>
 </html>
-

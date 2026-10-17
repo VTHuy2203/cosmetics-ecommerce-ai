@@ -4,65 +4,53 @@
  * Only accessible by Manager and Admin roles
  */
 
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once '../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once '../Layouts/Admin_Access_Check.php';
 
 $admin_role = $_SESSION['admin_role'] ?? null;
-$is_admin = isset($_SESSION['admin_is_admin']) && $_SESSION['admin_is_admin'] === true;
-
-// Check permission - Manager, Admin, or admin_is_admin session can export
-if ($admin_role !== 'manager' && $admin_role !== 'admin' && !$is_admin) {
-    // Check if user has IDNguoiDung (might be admin without role set)
-    if (!isset($_SESSION['IDNguoiDung']) && !isset($_SESSION['user'])) {
-        die('Access denied. Only Manager and Admin can export data.');
-    }
+if (!in_array($admin_role, ['manager', 'admin'], true)) {
+    http_response_code(403);
+    exit('Access denied.');
 }
-
-include("../DB_Connect.php");
 
 // Create PDO connection
 try {
-    $pdo = new PDO("mysql:host=localhost;dbname=webmipham1;charset=utf8mb4", "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    $pdo = app_pdo();
 } catch (PDOException $e) {
-    die("Database connection failed: " . $e->getMessage());
+    error_log('Analysis export database error: ' . $e->getMessage());
+    die('Database connection failed.');
 }
 
-// Get filter
-$filter = $_GET['label'] ?? 'all';
-$search = $_GET['search'] ?? '';
-$date_from = $_GET['date_from'] ?? '';
-$date_to = $_GET['date_to'] ?? '';
+// Same filters as Admin_Customer_Analysis.php
+$filter = in_array($_GET['label'] ?? 'all', ['all', 'normal', 'spam', 'follow-up', 'potential'], true) ? ($_GET['label'] ?? 'all') : 'all';
+$search = trim((string) ($_GET['search'] ?? ''));
+$validDate = static fn(string $value): string => preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1 ? $value : '';
+$date_from = $validDate((string) ($_GET['date_from'] ?? ''));
+$date_to = $validDate((string) ($_GET['date_to'] ?? ''));
 
 // Build query
 $where = [];
 $params = [];
 
 if ($filter !== 'all') {
-    $where[] = "ca.label = ?";
+    $where[] = "sc.segment = ?";
     $params[] = $filter;
 }
 
-if ($search) {
-    $where[] = "(k.HoVaTen LIKE ? OR k.Email LIKE ? OR k.SDT LIKE ? OR ca.last_need LIKE ?)";
+if ($search !== '') {
+    $where[] = "(k.HoVaTen LIKE ? OR k.Email LIKE ? OR k.SDT LIKE ? OR ca.last_need LIKE ? OR ca.product_interest LIKE ?)";
     $searchParam = "%{$search}%";
-    $params[] = $searchParam;
-    $params[] = $searchParam;
-    $params[] = $searchParam;
-    $params[] = $searchParam;
+    array_push($params, $searchParam, $searchParam, $searchParam, $searchParam, $searchParam);
 }
 
-if ($date_from) {
-    $where[] = "ca.updated_at >= ?";
+if ($date_from !== '') {
+    $where[] = "sc.last_activity_at >= ?";
     $params[] = $date_from . ' 00:00:00';
 }
 
-if ($date_to) {
-    $where[] = "ca.updated_at <= ?";
+if ($date_to !== '') {
+    $where[] = "sc.last_activity_at <= ?";
     $params[] = $date_to . ' 23:59:59';
 }
 
@@ -70,42 +58,37 @@ $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
 
 // Get customers
 $sql = "SELECT 
-    ca.id,
-    ca.user_id,
-    ca.session_id,
-    ca.label,
+    sc.subject_key AS id,
+    sc.user_id,
+    sc.session_id,
+    sc.segment AS label,
+    sc.intent_score,
+    sc.spam_risk_score,
+    sc.value_tier,
+    sc.reason_codes,
+    sc.last_activity_at,
     ca.product_interest,
     ca.last_need,
     ca.message_count,
     ca.has_appointment,
-    ca.updated_at,
+    sc.calculated_at AS updated_at,
     k.ID_KhachHang,
     k.HoVaTen,
     k.Email,
     k.SDT,
     k.DiaChi,
-    COUNT(DISTINCT cm.id) as total_messages,
-    COUNT(DISTINCT appt.id) as total_appointments
-FROM (
-    SELECT ca1.*
-    FROM customer_analysis ca1
-    INNER JOIN (
-        SELECT user_id, MAX(updated_at) as max_updated
-        FROM customer_analysis
-        WHERE user_id IS NOT NULL
-        GROUP BY user_id
-    ) ca2 ON ca1.user_id = ca2.user_id AND ca1.updated_at = ca2.max_updated
-    UNION
-    SELECT ca3.*
-    FROM customer_analysis ca3
-    WHERE ca3.user_id IS NULL
-) ca
-LEFT JOIN khachhang k ON ca.user_id = k.ID_KhachHang
-LEFT JOIN chat_messages cm ON (ca.user_id = cm.user_id AND ca.user_id IS NOT NULL) OR (ca.user_id IS NULL AND ca.session_id = cm.session_id)
-LEFT JOIN chat_appointments appt ON (ca.user_id = appt.user_id AND ca.user_id IS NOT NULL) OR (ca.user_id IS NULL AND ca.session_id = appt.session_id)
+    (SELECT COUNT(*) FROM chat_messages cm WHERE (sc.user_id IS NOT NULL AND cm.user_id=sc.user_id) OR (sc.user_id IS NULL AND cm.user_id IS NULL AND cm.session_id=sc.session_id)) AS total_messages,
+    (SELECT COUNT(*) FROM chat_appointments appt WHERE (sc.user_id IS NOT NULL AND appt.user_id=sc.user_id) OR (sc.user_id IS NULL AND appt.user_id IS NULL AND appt.session_id=sc.session_id)) AS total_appointments
+FROM customer_scores_current sc
+LEFT JOIN khachhang k ON sc.user_id = k.ID_KhachHang
+LEFT JOIN customer_analysis ca ON ca.id=(
+    SELECT ca2.id FROM customer_analysis ca2
+    WHERE (sc.user_id IS NOT NULL AND ca2.user_id=sc.user_id)
+       OR (sc.user_id IS NULL AND ca2.user_id IS NULL AND ca2.session_id=sc.session_id)
+    ORDER BY ca2.updated_at DESC,ca2.id DESC LIMIT 1
+)
 {$whereClause}
-GROUP BY ca.id, ca.user_id, ca.session_id, ca.label, ca.product_interest, ca.last_need, ca.message_count, ca.has_appointment, ca.updated_at, k.ID_KhachHang, k.HoVaTen, k.Email, k.SDT, k.DiaChi
-ORDER BY ca.updated_at DESC
+ORDER BY FIELD(sc.segment,'potential','follow-up','normal','spam'), sc.intent_score DESC, sc.last_activity_at DESC
 LIMIT 1000";
 
 $stmt = $pdo->prepare($sql);
@@ -118,6 +101,12 @@ header('Content-Disposition: attachment; filename="customer_analysis_' . date('Y
 
 // Create output stream
 $output = fopen('php://output', 'w');
+
+function csv_safe(mixed $value): string
+{
+    $value = (string) $value;
+    return preg_match('/^[=+\-@\t\r]/', $value) ? "'" . $value : $value;
+}
 
 // Add BOM for UTF-8
 fprintf($output, chr(0xEF).chr(0xBB).chr(0xBF));
@@ -132,6 +121,11 @@ fputcsv($output, [
     'Phone',
     'Address',
     'Label',
+    'Intent Score',
+    'Spam Risk',
+    'Value Tier',
+    'Score Reasons',
+    'Last Activity',
     'Product Interest',
     'Last Need',
     'Message Count',
@@ -139,11 +133,11 @@ fputcsv($output, [
     'Total Messages',
     'Total Appointments',
     'Updated At'
-], ',');
+], ',', '"', '');
 
 // Write data rows
 foreach ($customers as $customer) {
-    fputcsv($output, [
+    fputcsv($output, array_map('csv_safe', [
         $customer['id'],
         $customer['user_id'] ?? 'N/A',
         $customer['session_id'],
@@ -152,6 +146,14 @@ foreach ($customers as $customer) {
         $customer['SDT'] ?? 'N/A',
         $customer['DiaChi'] ?? 'N/A',
         ucfirst($customer['label']),
+        (int) $customer['intent_score'],
+        (int) $customer['spam_risk_score'],
+        $customer['value_tier'],
+        implode('; ', array_map(
+            static fn(array $reason): string => sprintf('%s (%+d)', $reason['label'] ?? $reason['code'] ?? '', (int) ($reason['points'] ?? 0)),
+            json_decode((string) ($customer['reason_codes'] ?? '[]'), true) ?: []
+        )),
+        $customer['last_activity_at'] ?? '',
         $customer['product_interest'] ?? '',
         $customer['last_need'] ?? '',
         $customer['message_count'],
@@ -159,7 +161,7 @@ foreach ($customers as $customer) {
         $customer['total_messages'] ?? 0,
         $customer['total_appointments'] ?? 0,
         $customer['updated_at']
-    ], ',');
+    ]), ',', '"', '');
 }
 
 fclose($output);

@@ -5,6 +5,7 @@
  */
 include("../DB_Connect.php");
 include("../Layouts/Head.php");
+require_once dirname(__DIR__, 3) . '/config/returns.php';
 
 if (!isset($_SESSION['user'])) {
     header('Location: Login.php');
@@ -17,29 +18,9 @@ $result_user = mysqli_query($conn, $sql_inf_user);
 $row_user = mysqli_fetch_array($result_user);
 $idKH = $row_user['ID_KhachHang'];
 
-// Ensure table exists
-$create_table = "CREATE TABLE IF NOT EXISTS `return_refund_requests` (
-    `ID_Request` INT AUTO_INCREMENT PRIMARY KEY,
-    `ID_DonHang` INT NOT NULL,
-    `ID_KhachHang` INT NOT NULL,
-    `ID_SanPham` INT NOT NULL,
-    `ContactName` VARCHAR(255) NOT NULL,
-    `ContactPhone` VARCHAR(20) NOT NULL,
-    `ContactEmail` VARCHAR(255) NOT NULL,
-    `ContactAddress` TEXT NOT NULL,
-    `RefundReason` TEXT NOT NULL,
-    `Attachments` TEXT NULL,
-    `TrangThai` ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
-    `ThoiGianTao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    `ThoiGianCapNhat` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_order (ID_DonHang),
-    INDEX idx_customer (ID_KhachHang),
-    INDEX idx_status (TrangThai)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-mysqli_query($conn, $create_table);
-
 // Get all return/refund requests for this customer
-$sql_requests = "SELECT r.*, d.TongTien, sp.TenSanPham, sp.GiaTien as ProductPrice, dct.SoLuong as ProductQuantity
+$sql_requests = "SELECT r.*, d.TongTien, sp.TenSanPham, dct.DonGia as ProductPrice,
+                        dct.SoLuong as ProductQuantity, dct.ThanhTienThucTra
                  FROM return_refund_requests r
                  LEFT JOIN donhang d ON r.ID_DonHang = d.ID_DonHang
                  LEFT JOIN sanpham sp ON r.ID_SanPham = sp.IDSanPham
@@ -100,8 +81,8 @@ $result_requests = mysqli_query($conn, $sql_requests);
                                             
                                             // Calculate refund amount
                                             $product_price = intval($row['ProductPrice'] ?? 0);
-                                            $product_quantity = intval($row['ProductQuantity'] ?? 0);
-                                            $refund_amount = $product_price * $product_quantity;
+                                            $product_quantity = intval($row['SoLuongYeuCau'] ?? 0);
+                                            $refund_amount = return_refund_preview_amount($row);
                                         ?>
                                             <tr>
                                                 <td><strong>#<?php echo $row['ID_Request']; ?></strong></td>
@@ -137,7 +118,7 @@ $result_requests = mysqli_query($conn, $sql_requests);
                                                 </td>
                                                 <td><?php echo $created_date; ?></td>
                                                 <td>
-                                                    <a href="Get_Order_Detail.php?order_id=<?php echo $row['ID_DonHang']; ?>" 
+                                                    <a href="../Processing/Get_Order_Detail.php?order_id=<?php echo $row['ID_DonHang']; ?>" 
                                                        class="btn btn-sm btn-info mb-1">
                                                         <i class="fas fa-eye me-1"></i>Xem đơn hàng
                                                     </a>

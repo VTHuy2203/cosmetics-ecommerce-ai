@@ -1,0 +1,111 @@
+name: moshop-production
+
+services:
+  app:
+    image: ${APP_IMAGE:?Set APP_IMAGE to an immutable registry tag}
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      APP_ENV: production
+      TRUST_PROXY_HEADERS: "true"
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?Set the trusted reverse-proxy CIDR}
+      MYSQL_HOST: ${MYSQL_HOST:?Set the managed MySQL hostname}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DB: ${MYSQL_DB:?Set MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER:?Set MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+    ports:
+      - "127.0.0.1:${APP_PORT:-8088}:80"
+    volumes:
+      - product_uploads:/var/www/html/TTTT/WebBanHangMyPham/Image_upload
+      - root_uploads:/var/www/html/TTTT/Image_upload
+      - private_storage:/var/www/html/TTTT/storage/private
+      - admin_product_images:/var/www/html/TTTT/AdminManage/src/Products/IMG_Products
+      - admin_brand_images:/var/www/html/TTTT/AdminManage/src/Brands/IMG_Brand
+      - admin_category_images:/var/www/html/TTTT/AdminManage/src/Categorys/IMG_Category
+      - admin_news_images:/var/www/html/TTTT/AdminManage/src/News_Posts/IMG_News_Posts
+    networks: [backend]
+
+  scheduler:
+    image: ${APP_IMAGE:?Set APP_IMAGE to an immutable registry tag}
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      APP_ENV: production
+      MYSQL_HOST: ${MYSQL_HOST:?Set the managed MySQL hostname}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DB: ${MYSQL_DB:?Set MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER:?Set MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+    command: ["sh", "-c", "i=0; while true; do if php /var/www/html/TTTT/bin/expire-payments.php && php /var/www/html/TTTT/bin/process-outbox.php && php /var/www/html/TTTT/bin/publish-scheduled-marketing.php; then touch /tmp/scheduler-heartbeat; fi; if [ $$((i % 5)) -eq 0 ]; then php /var/www/html/TTTT/bin/score-customers.php > /dev/null || true; fi; i=$$((i + 1)); sleep 60; done"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/scheduler-heartbeat && find /tmp/scheduler-heartbeat -mmin -2 -print -quit | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [backend]
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?Set the Cloudflare Tunnel token}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [backend]
+
+  ai:
+    profiles: ["ai"]
+    image: ${AI_IMAGE:?Set AI_IMAGE to an immutable registry tag}
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      APP_ENV: production
+      MYSQL_HOST: ${MYSQL_HOST:?Set the managed MySQL hostname}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DB: ${MYSQL_DB:?Set MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER:?Set MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      CHROMA_DIR: /data/chroma
+      OLLAMA_HOST: ${OLLAMA_HOST:?Set OLLAMA_HOST}
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:?Set AI_SERVICE_TOKEN}
+      AI_ALLOWED_ORIGINS: ${AI_ALLOWED_ORIGINS:-}
+    volumes:
+      - ai_chroma:/data/chroma
+    networks: [backend]
+
+  rag-worker:
+    profiles: ["ai"]
+    image: ${AI_IMAGE:?Set AI_IMAGE to an immutable registry tag}
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      APP_ENV: production
+      MYSQL_HOST: ${MYSQL_HOST:?Set the managed MySQL hostname}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DB: ${MYSQL_DB:?Set MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER:?Set MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      CHROMA_DIR: /data/chroma
+    command: ["sh", "-c", "while true; do python sync_catalog_outbox.py; sleep 15; done"]
+    volumes:
+      - ai_chroma:/data/chroma
+    networks: [backend]
+
+volumes:
+  product_uploads:
+  root_uploads:
+  private_storage:
+  admin_product_images:
+  admin_brand_images:
+  admin_category_images:
+  admin_news_images:
+  ai_chroma:
+
+networks:
+  backend:
+    driver: bridge

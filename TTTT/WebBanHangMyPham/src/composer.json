@@ -1,5 +1,10 @@
 {
+    "name": "moshop/legacy-mailer",
+    "description": "Legacy isolated mailer dependency",
+    "type": "project",
+    "license": "proprietary",
     "require": {
+        "php": "^8.4",
         "phpmailer/phpmailer": "^6.6"
     }
 }

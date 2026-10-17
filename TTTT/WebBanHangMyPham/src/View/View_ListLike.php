@@ -135,7 +135,8 @@ else{
                 type: 'POST',
                 url: '../Processing/XuLy_YeuThich.php',
                 data: {
-                    del_like_product_id: IDSanPham
+                    del_like_product_id: IDSanPham,
+                    csrf_token: <?php echo json_encode(csrf_token()); ?>
                 },
                 success: function(response) {
                     if(response == "tontai")
@@ -168,7 +169,8 @@ else{
                 url: 'Cart.php',
                 data: {
                     IDSanPham: IDSanPham,
-                    addcart: 'addcart'
+                    addcart: 'addcart',
+                    csrf_token: <?php echo json_encode(csrf_token()); ?>
                 },
                 dataType: 'json',
                 success: function(response) {

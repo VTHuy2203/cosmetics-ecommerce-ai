@@ -15,7 +15,7 @@ $admin_id = $_SESSION['admin_id'] ?? 0;
 $user_id = $admin_id; // For compatibility with existing code
 
 // Handle order acceptance
-if (isset($_GET['accept_order']) && $_GET['accept_order'] > 0) {
+if (false && isset($_GET['accept_order']) && $_GET['accept_order'] > 0) {
     $order_id = intval($_GET['accept_order']);
     mysqli_query($conn, "UPDATE donhang SET TrangThai = 2, ID_Shipper = $user_id WHERE ID_DonHang = $order_id AND TrangThai = 1");
     header('Location: Shipper_Orders.php?msg=accepted');
@@ -23,7 +23,7 @@ if (isset($_GET['accept_order']) && $_GET['accept_order'] > 0) {
 }
 
 // Handle delivery confirmation
-if (isset($_GET['confirm_delivery']) && $_GET['confirm_delivery'] > 0) {
+if (false && isset($_GET['confirm_delivery']) && $_GET['confirm_delivery'] > 0) {
     $order_id = intval($_GET['confirm_delivery']);
     // Update order: set status to 3 (Delivered)
     // NOTE: Stock is NOT reduced here - it was already reduced when admin approved the order
@@ -34,7 +34,7 @@ if (isset($_GET['confirm_delivery']) && $_GET['confirm_delivery'] > 0) {
 }
 
 // Ensure ID_Shipper column exists
-@mysqli_query($conn, "ALTER TABLE `donhang` ADD `ID_Shipper` INT NULL AFTER `DaThanhToan`");
+// Schema is managed by versioned migrations.
 
 // Get orders for this shipper
 $sql = "SELECT d.*, k.HoVaTen, k.SDT, k.DiaChi 

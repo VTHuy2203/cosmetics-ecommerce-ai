@@ -4,10 +4,7 @@
  */
 
 include("../DB_Connect.php");
-// Ensure session is started only once
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
 // Load email configuration
 $email_config = [];
@@ -22,9 +19,9 @@ function sendEmailViaSMTP($to, $code, $code_link, $config) {
     $smtp_host = $config['smtp_host'] ?? 'smtp.gmail.com';
     // $smtp_port = $config['smtp_port'] ?? 587;
     $smtp_port = $config['port'] ?? 465;
-    $smtp_user = $config['smtp_username'] ?? 'moshop.danang@gmail.com';
-    $smtp_pass = $config['smtp_password'] ?? 'hfut obvm twyi zpfw';
-    $from_email = $config['from_email'] ?? 'moshop.danang@gmail.com';
+    $smtp_user = $config['smtp_username'] ?? '';
+    $smtp_pass = $config['smtp_password'] ?? '';
+    $from_email = $config['from_email'] ?? 'no-reply@example.com';
     $from_name = $config['from_name'] ?? 'Mơ Shop';
     
     $subject = 'Mã xác nhận đăng ký tài khoản - Mơ Shop';
@@ -36,7 +33,7 @@ function sendEmailViaSMTP($to, $code, $code_link, $config) {
     $headers .= "Content-Type: text/plain; charset=UTF-8\r\n";
     $headers .= "X-Mailer: PHP/" . phpversion();
     
-    return @mail($to, $subject, $message, $headers);
+    return mail($to, $subject, $message, $headers);
 }
 
 // Check if PHPMailer is available
@@ -60,39 +57,27 @@ foreach ($autoload_paths as $path) {
 }
 
 if (isset($_POST['email']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = mysqli_real_escape_string($conn, $_POST['email']);
+    require_csrf();
+    $email = strtolower(trim((string) $_POST['email']));
     
     // Validate email
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
         echo 'invalid_email';
         exit();
     }
-    
-    // Generate 6-digit verification code
-    $verification_code = str_pad(rand(0, 999999), 6, '0', STR_PAD_LEFT);
-    
-    // Store verification code in session (expires in 30 minutes)
-    $_SESSION['email_verification_code'] = $verification_code;
-    $_SESSION['email_verification_email'] = $email;
-    $_SESSION['email_verification_time'] = time();
-    
-    // Create email verification table for persistence
-    @mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `email_verifications` (
-        `id` INT AUTO_INCREMENT PRIMARY KEY,
-        `email` VARCHAR(255) NOT NULL,
-        `code` VARCHAR(6) NOT NULL,
-        `expires_at` TIMESTAMP NOT NULL,
-        `used` TINYINT(1) NOT NULL DEFAULT 0,
-        `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_email (email),
-        INDEX idx_code (code),
-        INDEX idx_expires (expires_at)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-    
+    if (!auth_rate_limit('registration-otp:' . $email, 5, 900)) {
+        http_response_code(429);
+        echo 'rate_limited';
+        exit();
+    }
+    $emailLogId = substr(hash('sha256', $email), 0, 12);
+
     // Check for cooldown (30 seconds between resends as requested)
-    $last_send = mysqli_query($conn, "SELECT created_at FROM email_verifications WHERE email = '$email' ORDER BY created_at DESC LIMIT 1");
-    if ($last_send && mysqli_num_rows($last_send) > 0) {
-        $last_row = mysqli_fetch_assoc($last_send);
+    $lastSend = $conn->prepare('SELECT created_at FROM email_verifications WHERE email = ? ORDER BY created_at DESC LIMIT 1');
+    $lastSend->bind_param('s', $email);
+    $lastSend->execute();
+    $last_row = $lastSend->get_result()->fetch_assoc();
+    if ($last_row) {
         if (!empty($last_row['created_at'])) {
             $last_time = strtotime($last_row['created_at']);
             $current_time = time();
@@ -112,26 +97,25 @@ if (isset($_POST['email']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
     
-    // Store in database (expires in 30 minutes as requested)
-    // Use MySQL's NOW() and DATE_ADD to ensure timezone consistency
-    // This avoids timezone issues between PHP and MySQL
-    $insert_query = "INSERT INTO `email_verifications` (`email`, `code`, `expires_at`) 
-                     VALUES ('$email', '$verification_code', DATE_ADD(NOW(), INTERVAL 30 MINUTE))";
-    
-    $result = mysqli_query($conn, $insert_query);
-    
-    if (!$result) {
-        error_log("Failed to insert OTP: " . mysqli_error($conn));
+    $verification_code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+    $insert = $conn->prepare(
+        'INSERT INTO email_verifications (email, code, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 30 MINUTE))'
+    );
+    $insert->bind_param('ss', $email, $verification_code);
+    if (!$insert->execute()) {
+        error_log('Failed to insert OTP; email_ref=' . $emailLogId);
         echo 'error';
         exit();
     }
-    
-    // Log code creation for debugging
-    $current_time = time();
-    error_log("OTP Created - Email: $email, Code: $verification_code, Created: " . date('Y-m-d H:i:s', $current_time) . ", Expires: " . date('Y-m-d H:i:s', $current_time + 1800));
+
+    // Update the session only after the durable record succeeds. A cooldown
+    // rejection must never silently replace the code the customer received.
+    $_SESSION['email_verification_code'] = $verification_code;
+    $_SESSION['email_verification_email'] = $email;
+    $_SESSION['email_verification_time'] = time();
     
     // Create direct link to view code (for development/testing)
-    $code_link = "http://" . $_SERVER['HTTP_HOST'] . dirname(dirname($_SERVER['PHP_SELF'])) . "/View/View_Verification_Code.php?email=" . urlencode($email) . "&code=" . $verification_code;
+    $code_link = rtrim(app_env('APP_URL', 'http://localhost/TTTT') ?? '', '/') . '/WebBanHangMyPham/src/View/Register.php';
     
     // Try to send email using PHPMailer (if available) or fallback to SMTP
     $email_sent = false;
@@ -145,26 +129,17 @@ if (isset($_POST['email']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
             
             // Server settings - Gmail SMTP configuration
             $mail->isSMTP();
-            $mail->Host = 'smtp.gmail.com';
+            $mail->Host = (string) ($email_config['smtp_host'] ?? 'smtp.gmail.com');
             $mail->SMTPAuth = true;
-            $mail->Username = 'moshop.danang@gmail.com';
-            $mail->Password = 'hfut obvm twyi zpfw';
-            // Use TLS encryption for Gmail
-            $mail->SMTPSecure = 'tls';
-            $mail->Port = 587;
+            $mail->Username = (string) ($email_config['smtp_username'] ?? '');
+            $mail->Password = (string) ($email_config['smtp_password'] ?? '');
+            $mail->SMTPSecure = (string) ($email_config['smtp_secure'] ?? 'tls');
+            $mail->Port = (int) ($email_config['port'] ?? 587);
                 
                 $mail->CharSet = 'UTF-8';
                 $mail->SMTPDebug = 0; // Disable debug for production
                 // $mail->Debugoutput = 'html';
 
-                $mail->SMTPOptions = array(
-                    'ssl' => array(
-                        'verify_peer' => false,
-                        'verify_peer_name' => false,
-                        'allow_self_signed' => true
-                    )
-                );
-                
                 // Recipients
                 $from_email = $email_config['from_email'] ?? 'moshop.danang@gmail.com';
                 $from_name = $email_config['from_name'] ?? 'Mơ Shop';
@@ -208,32 +183,32 @@ if (isset($_POST['email']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 
                 $mail->send();
                 $email_sent = true;
-                error_log("Email sent successfully via PHPMailer to: $email");
+                error_log('Email sent successfully via PHPMailer; email_ref=' . $emailLogId);
         } catch (\Exception $e) {
             $error_msg = isset($mail) && method_exists($mail, 'ErrorInfo') ? $mail->ErrorInfo : $e->getMessage();
-            error_log("PHPMailer error: " . $error_msg);
+            error_log('PHPMailer send failed; email_ref=' . $emailLogId);
             $email_sent = false;
         } catch (\Error $e) {
-            error_log("PHPMailer class not found: " . $e->getMessage());
+            error_log('PHPMailer runtime failed; email_ref=' . $emailLogId);
             $email_sent = false;
         } catch (\Throwable $e) {
-            error_log("Email sending error: " . $e->getMessage());
+            error_log('Email sending failed; email_ref=' . $emailLogId);
             $email_sent = false;
         }
     }
     
     // Fallback: Try simple SMTP using socket connection if PHPMailer failed
     if (!$email_sent) {
-        error_log("PHPMailer failed, trying fallback SMTP method for: $email");
+        error_log('PHPMailer failed, trying fallback SMTP; email_ref=' . $emailLogId);
         $email_sent = sendEmailViaSMTP($email, $verification_code, $code_link, $email_config);
         if ($email_sent) {
-            error_log("Email sent successfully via fallback SMTP to: $email");
+            error_log('Email sent successfully via fallback SMTP; email_ref=' . $emailLogId);
         }
     }
     
     // Try to send email using PHP mail() function if both PHPMailer and SMTP failed
     if (!$email_sent) {
-        error_log("Both PHPMailer and SMTP failed, trying PHP mail() for: $email");
+        error_log('PHPMailer and SMTP failed, trying PHP mail; email_ref=' . $emailLogId);
         $subject = 'Mã xác nhận đăng ký tài khoản - Mơ Shop';
         $message = "Xin chào!\n\n";
         $message .= "Cảm ơn bạn đã đăng ký tài khoản tại Mơ Shop.\n\n";
@@ -249,11 +224,11 @@ if (isset($_POST['email']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $headers .= "X-Mailer: PHP/" . phpversion();
         
         // Try to send email
-        if (@mail($email, $subject, $message, $headers)) {
+        if (mail($email, $subject, $message, $headers)) {
             $email_sent = true;
-            error_log("Email sent successfully via PHP mail() to: $email");
+            error_log('Email sent successfully via PHP mail; email_ref=' . $emailLogId);
         } else {
-            error_log("PHP mail() also failed for: $email");
+            error_log('PHP mail failed; email_ref=' . $emailLogId);
         }
     }
     
@@ -261,13 +236,12 @@ if (isset($_POST['email']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($email_sent) {
         echo 'success';
     } else {
-        // If all email methods failed, log it but still return success
-        // The code is stored in database and can be verified via the code link
-        error_log("CRITICAL: All email sending methods failed for: $email. Code: $verification_code. Code link: $code_link");
-        // Still return success so user can register using the code link
-        echo 'success';
+        error_log('All email sending methods failed; email_ref=' . $emailLogId);
+        http_response_code(503);
+        echo 'error';
     }
 } else {
+    http_response_code(405);
     echo 'error';
 }
 ?>

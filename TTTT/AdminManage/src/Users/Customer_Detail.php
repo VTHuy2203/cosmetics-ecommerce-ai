@@ -16,68 +16,37 @@
   $kh = mysqli_query($conn, "SELECT * FROM khachhang WHERE ID_KhachHang=$uid");
   $user = $kh ? mysqli_fetch_assoc($kh) : null;
 
-  // Lead label - try leads table first, fallback to lead_scores
+  // Canonical explainable score.
   $lead = null;
   $needTxt = '';
-  $appointment_time = null;
   try {
-    $pdo = new PDO("mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4", "root", "", [
-      PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-      PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
-    $leadStmt = $pdo->prepare("SELECT label, score, updated_at, product_interest, last_message, appointment_at FROM leads WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1");
+    $pdo = app_pdo();
+    $leadStmt = $pdo->prepare("SELECT sc.segment AS label,sc.intent_score AS score,sc.spam_risk_score,
+                                      sc.value_score,sc.value_tier,sc.reason_codes,sc.calculated_at AS updated_at,
+                                      ca.product_interest,ca.last_need
+                               FROM customer_scores_current sc
+                               LEFT JOIN customer_analysis ca ON ca.id=(SELECT ca2.id FROM customer_analysis ca2 WHERE ca2.user_id=sc.user_id ORDER BY ca2.updated_at DESC,ca2.id DESC LIMIT 1)
+                               WHERE sc.user_id=? LIMIT 1");
     $leadStmt->execute([$uid]);
-    $leadRow = $leadStmt->fetch();
-    if ($leadRow) {
-      $lead = [
-        'label' => $leadRow['label'] ?? 'neutral',
-        'probability' => isset($leadRow['score']) ? ((int)$leadRow['score'] / 100.0) : 0.9,
-        'updated_at' => $leadRow['updated_at'],
-        'score' => $leadRow['score'] ?? 90
-      ];
-      $needTxt = $leadRow['product_interest'] ?: $leadRow['last_message'] ?: '';
-      $appointment_time = $leadRow['appointment_at'] ?? null;
-    }
+    $lead = $leadStmt->fetch() ?: null;
+    $needTxt = $lead ? (string) ($lead['last_need'] ?: $lead['product_interest'] ?: '') : '';
   } catch (Exception $e) {
-    // Fallback to lead_scores
-    $lr = mysqli_query($conn, "SELECT label, probability, updated_at FROM lead_scores WHERE user_id=$uid ORDER BY updated_at DESC LIMIT 1");
-    if ($lr) $lead = mysqli_fetch_assoc($lr);
-  }
-  
-  // If still no need text, try customer_needs
-  if (!$needTxt) {
-    $qn = mysqli_query($conn, "SELECT need_text FROM customer_needs WHERE user_id=$uid ORDER BY created_at DESC LIMIT 1");
-    if ($qn && ($nr = mysqli_fetch_assoc($qn))) { $needTxt = $nr['need_text']; }
+    error_log('Customer detail score error: ' . $e->getMessage());
   }
 
   // CRITICAL: Use PDO for chat_messages (not mysqli) - chat tables use PDO
   $pdo_chat = null;
   $msgs_data = [];
   try {
-    $pdo_chat = new PDO("mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4", "root", "", [
-      PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-      PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    $pdo_chat = app_pdo();
     
-    // Get session_id from chat_messages or leads table
+    // Get the latest session_id from chat_messages
     $session_id = null;
-    
-    // Strategy 1: Get session_id from chat_messages
     $sid_stmt = $pdo_chat->prepare("SELECT session_id FROM chat_messages WHERE user_id = :uid ORDER BY id DESC LIMIT 1");
     $sid_stmt->execute([":uid" => $uid]);
     $sid_row = $sid_stmt->fetch();
     if ($sid_row && !empty($sid_row['session_id'])) {
       $session_id = $sid_row['session_id'];
-    }
-    
-    // Strategy 2: Get session_id from leads table if not found
-    if (!$session_id) {
-      $sid_stmt2 = $pdo_chat->prepare("SELECT session_id FROM leads WHERE user_id = :uid ORDER BY id DESC LIMIT 1");
-      $sid_stmt2->execute([":uid" => $uid]);
-      $sid_row2 = $sid_stmt2->fetch();
-      if ($sid_row2 && !empty($sid_row2['session_id'])) {
-        $session_id = $sid_row2['session_id'];
-      }
     }
     
     // Get all messages - prioritize user_id, then session_id
@@ -113,10 +82,7 @@
   $appts_data = [];
   try {
     if (!$pdo_chat) {
-      $pdo_chat = new PDO("mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4", "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-      ]);
+      $pdo_chat = app_pdo();
     }
     
     if ($session_id) {
@@ -176,65 +142,29 @@
                 <div class="card-header">Lead</div>
                 <div class="card-body">
                   <?php
-                    // Get lead information using PDO
-                    $lead_info = null;
-                    try {
-                      if (!$pdo_chat) {
-                        $pdo_chat = new PDO("mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4", "root", "", [
-                          PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                          PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-                        ]);
-                      }
-                      
-                      $lead_stmt = $pdo_chat->prepare("SELECT * FROM leads WHERE user_id = :uid ORDER BY updated_at DESC LIMIT 1");
-                      $lead_stmt->execute([":uid" => $uid]);
-                      $lead_info = $lead_stmt->fetch();
-                    } catch (Exception $e) {
-                      error_log("Customer_Detail.php: Error loading lead: " . $e->getMessage());
-                    }
-                    
-                    if ($lead_info) {
-                      $label = $lead_info['label'] ?? 'neutral';
-                      // Map labels to display badges
+                    if ($lead) {
+                      $label = $lead['label'] ?? 'normal';
                       if ($label === 'potential') {
-                        $badge = '<span class="badge bg-success">Potential</span>';
-                      } else if ($label === 'needs_followup') {
-                        $badge = '<span class="badge bg-warning">Cần theo dõi</span>';
+                        $badge = '<span class="badge bg-success">Tiềm năng</span>';
+                      } else if ($label === 'follow-up') {
+                        $badge = '<span class="badge bg-warning text-dark">Đang theo dõi</span>';
                       } else if ($label === 'spam') {
                         $badge = '<span class="badge bg-danger">Spam</span>';
                       } else {
-                        $badge = '<span class="badge bg-secondary">Neutral</span>';
-                      }
-
-                      $score = isset($lead_info['score']) ? (int)$lead_info['score'] : 0;
-                      $prob = $score . '%';
-
-                      echo "<div>$badge <strong>$prob</strong></div>";
-                      echo "<div class='small text-muted mt-1'>Cập nhật: ".htmlspecialchars($lead_info['updated_at'] ?? 'N/A')."</div>";
-                      
-                      // Show most recent customer need from product_interest or last_message
-                      $recent_need = $lead_info['product_interest'] ?? $lead_info['last_message'] ?? '';
-                      if ($recent_need) {
-                        echo "<hr class='my-2'><div><strong>Nhu cầu gần nhất:</strong><br>".nl2br(htmlspecialchars($recent_need))."</div>";
-                      } else if ($needTxt) {
-                        echo "<hr class='my-2'><div><strong>Nhu cầu gần nhất:</strong><br>".nl2br(htmlspecialchars($needTxt))."</div>";
-                      }
-                    } else if ($lead) {
-                      // Fallback to old lead data if available
-                      $label = $lead['label'] ?? 'neutral';
-                      if ($label === 'potential') {
-                        $badge = '<span class="badge bg-success">Potential</span>';
-                      } else if ($label === 'needs_followup') {
-                        $badge = '<span class="badge bg-warning">Cần theo dõi</span>';
-                      } else if ($label === 'spam') {
-                        $badge = '<span class="badge bg-danger">Spam</span>';
-                      } else {
-                        $badge = '<span class="badge bg-secondary">Neutral</span>';
+                        $badge = '<span class="badge bg-secondary">Bình thường</span>';
                       }
                       $score = isset($lead['score']) ? (int)$lead['score'] : 0;
-                      $prob = $score . '%';
-                      echo "<div>$badge <strong>$prob</strong></div>";
+                      echo "<div>$badge <strong>".$score."/100 điểm</strong></div>";
+                      echo "<div class='small text-muted'>Spam: ".(int)($lead['spam_risk_score'] ?? 0)." · Giá trị: ".htmlspecialchars($lead['value_tier'] ?? 'new')."</div>";
                       echo "<div class='small text-muted mt-1'>Cập nhật: ".htmlspecialchars($lead['updated_at'] ?? 'N/A')."</div>";
+                      $reasons = json_decode((string) ($lead['reason_codes'] ?? '[]'), true);
+                      if (is_array($reasons) && $reasons) {
+                        echo "<hr class='my-2'><strong>Lý do tính điểm:</strong><ul class='mb-2'>";
+                        foreach ($reasons as $reason) {
+                          echo '<li>'.sprintf('%+d', (int)($reason['points'] ?? 0)).' '.htmlspecialchars($reason['label'] ?? '').'</li>';
+                        }
+                        echo '</ul>';
+                      }
                       if ($needTxt) {
                         echo "<hr class='my-2'><div><strong>Nhu cầu gần nhất:</strong><br>".nl2br(htmlspecialchars($needTxt))."</div>";
                       }
@@ -253,14 +183,6 @@
               <div class="card mb-4">
                 <div class="card-header">Lịch khách đã đặt</div>
                 <div class="card-body">
-                  <?php 
-                    // Show appointment time from leads table if available
-                    if ($appointment_time) {
-                      $appt_dt = new DateTime($appointment_time);
-                      $appt_formatted = $appt_dt->format('d/m/Y H:i');
-                      echo "<div class='alert alert-info mb-3'><strong>Thời gian tư vấn:</strong> " . htmlspecialchars($appt_formatted) . "</div>";
-                    }
-                  ?>
                   <?php if (!empty($appts_data) && count($appts_data) > 0): ?>
                     <table class="table table-sm">
                       <thead>

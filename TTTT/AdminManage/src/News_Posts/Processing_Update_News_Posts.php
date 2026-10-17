@@ -1,60 +1,32 @@
 <?php
-require_once "../DB_Connect.php";
+declare(strict_types=1);
 
-// Kiểm tra form gửi là post
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['News_Posts_id'])) {
-    // Lấy dữ liệu từ form
-    $tieuDeBaiViet = $_POST['tieuDeBaiViet'];
-    $News_Posts_id = $_POST['News_Posts_id'];
-    $baiViet = $_POST['baiViet'];
+require_once '../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/uploads.php';
+require_once '../Layouts/Admin_Access_Check.php';
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') { header('Location: Manage_News_Posts.php'); exit; }
+require_csrf();
 
-    // Kiểm tra xem người dùng đã chọn hình ảnh mới hay không
-    $update_image = false;
-    $target_file = '';
-
-    if (isset($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
-        //check file có phải là ảnh không
-        $check = getimagesize($_FILES["image"]["tmp_name"]);
-
-        if ($check !== false) {
-            $update_image = true;
-
-            $target_dir = "IMG_News_Posts/";
-            $target_file = $target_dir . basename($_FILES["image"]["name"]);
-
-            move_uploaded_file($_FILES["image"]["tmp_name"], $target_file);
-        }
-    }
-
-    // Thực hiện truy vấn để cập nhật thông tin sản phẩm trong CSDL
-    $update_sql = "UPDATE tintucbaiviet SET TieuDeBaiViet='$tieuDeBaiViet', BaiViet='$baiViet'";
-
-    if ($update_image) {
-        // Nếu người dùng đã chọn hình ảnh mới, cập nhật đường dẫn hình ảnh
-        $update_sql .= ", AnhBaiViet='$target_file'";
-    }
-
-    $update_sql .= " WHERE ID_TinTucBaiViet ='$News_Posts_id'";
-
-    $result = mysqli_query($conn, $update_sql);
-
-    if ($result) {
-        // Send WebSocket notification to Staff and Customers
-        $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-        if (file_exists($wsPushFile)) {
-            require_once($wsPushFile);
-            if (function_exists('websocket_push_news_update')) {
-                websocket_push_news_update($News_Posts_id, $tieuDeBaiViet, 'update');
-            }
-        }
-    }
-
-    header('Location: Manage_News_Posts.php');
-    exit();
-} else {
-    header('Location: Manage_News_Posts.php');
-    exit();
+$id = (int) ($_POST['News_Posts_id'] ?? 0);
+$title = trim((string) ($_POST['tieuDeBaiViet'] ?? ''));
+$content = (string) ($_POST['baiViet'] ?? '');
+if ($id < 1 || $title === '' || mb_strlen($title) > 500 || mb_strlen($content) > 100000) {
+    http_response_code(422); exit('Dữ liệu không hợp lệ.');
 }
 
-mysqli_close($conn);
-?>
+$image = null;
+if (isset($_FILES['image']) && ($_FILES['image']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
+    $image = 'IMG_News_Posts/' . store_public_image_upload($_FILES['image'], __DIR__ . '/IMG_News_Posts');
+}
+if ($image !== null) {
+    $statement = $conn->prepare(
+        'UPDATE tintucbaiviet SET TieuDeBaiViet = ?, BaiViet = ?, AnhBaiViet = ? WHERE ID_TinTucBaiViet = ?'
+    );
+    $statement->bind_param('sssi', $title, $content, $image, $id);
+} else {
+    $statement = $conn->prepare('UPDATE tintucbaiviet SET TieuDeBaiViet = ?, BaiViet = ? WHERE ID_TinTucBaiViet = ?');
+    $statement->bind_param('ssi', $title, $content, $id);
+}
+$statement->execute();
+header('Location: Manage_News_Posts.php?updated=1');
+exit;

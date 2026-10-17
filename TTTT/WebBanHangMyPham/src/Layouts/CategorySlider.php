@@ -1,9 +1,3 @@
-<?php
-    include("../DB_Connect.php");
-    include("../Layouts/Head.php");
-?>
-
-
 <div class="container my-3">
     <div class="slider_category border-0 shadow-sm rounded-4">
         <div class="wrapper">

@@ -1,6 +1,5 @@
 <?php
 include("../DB_Connect.php");
-session_start();
 
 if (!isset($_SESSION['user']) || !isset($_GET['order_id'])) {
     echo '<div class="alert alert-danger">Không có quyền truy cập.</div>';
@@ -156,7 +155,7 @@ $order_date = isset($order['NgayTao']) ? date('d/m/Y H:i', strtotime($order['Nga
                     if (in_array(intval($detail['IDSanPham']), $unrated_products)):
                 ?>
                     <li>
-                        <a href="../../View/Detail_Product.php?product_id=<?php echo $detail['IDSanPham']; ?>" class="alert-link">
+                        <a href="../View/Detail_Product.php?product_id=<?php echo $detail['IDSanPham']; ?>" class="alert-link">
                             <?php echo htmlspecialchars($detail['TenSanPham']); ?>
                         </a>
                     </li>
@@ -199,7 +198,7 @@ $order_date = isset($order['NgayTao']) ? date('d/m/Y H:i', strtotime($order['Nga
                                      alt="" class="img-thumbnail" style="width: 80px; height: 80px; object-fit: cover;">
                             </td>
                             <td>
-                                <a href="../../View/Detail_Product.php?product_id=<?php echo $product_id; ?>" 
+                                <a href="../View/Detail_Product.php?product_id=<?php echo $product_id; ?>" 
                                    class="text-decoration-none text-dark fw-semibold">
                                     <?php echo htmlspecialchars($detail['TenSanPham']); ?>
                                 </a>

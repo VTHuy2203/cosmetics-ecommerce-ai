@@ -1,0 +1,162 @@
+{
+  "schema": "moshop-rag-eval-v1",
+  "embedding_model": "moshop-char-word-hash-v1",
+  "distance_metric": "l2_on_normalized_embeddings",
+  "top_k": 2,
+  "product_max_distance": 1.595925,
+  "knowledge_max_distance": 1.6002,
+  "quality": {
+    "cosmetics_products": {
+      "threshold": 1.595925,
+      "precision": 1.0,
+      "recall": 0.875,
+      "f1": 0.9333,
+      "case_pass_rate": 1.0
+    },
+    "shop_knowledge": {
+      "threshold": 1.6002,
+      "precision": 0.8571,
+      "recall": 0.75,
+      "f1": 0.8,
+      "case_pass_rate": 1.0
+    }
+  },
+  "latency_ms": {
+    "model_load": 0.0,
+    "median_query": 2.01,
+    "p95_query": 34.97
+  },
+  "cases": 16,
+  "catalog_count": 18,
+  "case_results": [
+    {
+      "id": "lip-balm",
+      "collection": "cosmetics_products",
+      "predicted_ids": [
+        "37",
+        "45"
+      ],
+      "passed": true
+    },
+    {
+      "id": "sunscreen-oily",
+      "collection": "cosmetics_products",
+      "predicted_ids": [
+        "46",
+        "86"
+      ],
+      "passed": true
+    },
+    {
+      "id": "cleanser-acne",
+      "collection": "cosmetics_products",
+      "predicted_ids": [
+        "85",
+        "48"
+      ],
+      "passed": true
+    },
+    {
+      "id": "micellar-oily",
+      "collection": "cosmetics_products",
+      "predicted_ids": [
+        "52",
+        "90"
+      ],
+      "passed": true
+    },
+    {
+      "id": "moisturizer-dry",
+      "collection": "cosmetics_products",
+      "predicted_ids": [
+        "87",
+        "47"
+      ],
+      "passed": true
+    },
+    {
+      "id": "daily-mask",
+      "collection": "cosmetics_products",
+      "predicted_ids": [
+        "50",
+        "49"
+      ],
+      "passed": true
+    },
+    {
+      "id": "foundation",
+      "collection": "cosmetics_products",
+      "predicted_ids": [
+        "55"
+      ],
+      "passed": true
+    },
+    {
+      "id": "eyeliner",
+      "collection": "cosmetics_products",
+      "predicted_ids": [
+        "53"
+      ],
+      "passed": true
+    },
+    {
+      "id": "weather-negative",
+      "collection": "cosmetics_products",
+      "predicted_ids": [],
+      "passed": true
+    },
+    {
+      "id": "programming-negative",
+      "collection": "cosmetics_products",
+      "predicted_ids": [],
+      "passed": true
+    },
+    {
+      "id": "oily-skin",
+      "collection": "shop_knowledge",
+      "predicted_ids": [
+        "faq_0"
+      ],
+      "passed": true
+    },
+    {
+      "id": "dry-skin",
+      "collection": "shop_knowledge",
+      "predicted_ids": [
+        "faq_1",
+        "faq_4"
+      ],
+      "passed": true
+    },
+    {
+      "id": "pregnancy",
+      "collection": "shop_knowledge",
+      "predicted_ids": [
+        "faq_6"
+      ],
+      "passed": true
+    },
+    {
+      "id": "authenticity",
+      "collection": "shop_knowledge",
+      "predicted_ids": [
+        "faq_7"
+      ],
+      "passed": true
+    },
+    {
+      "id": "return-policy",
+      "collection": "shop_knowledge",
+      "predicted_ids": [
+        "faq_8"
+      ],
+      "passed": true
+    },
+    {
+      "id": "knowledge-negative",
+      "collection": "shop_knowledge",
+      "predicted_ids": [],
+      "passed": true
+    }
+  ]
+}

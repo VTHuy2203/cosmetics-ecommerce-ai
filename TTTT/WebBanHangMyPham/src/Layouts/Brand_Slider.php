@@ -1,9 +1,3 @@
-<?php
-include("../DB_Connect.php");
-include("../Layouts/Head.php");
-?>
-
-
 <div class="container bg-light mt-3" id="brand">
     <div class="p-2 bg-white rounded-4 shadow-sm">
         <div class="text-left px-3 pt-3">

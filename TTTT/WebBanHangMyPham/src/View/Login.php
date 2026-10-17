@@ -1,29 +1,51 @@
 <?php
-include("../Layouts/Head.php");
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
 if (isset($_POST['tenDangNhap']) && isset($_POST['matKhau']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $sql_login = "select * from KhachHang where TenDangNhap = '" . $_POST['tenDangNhap'] . "' and MatKhau = '" . $_POST['matKhau'] . "'";
+    require_csrf();
+    require_turnstile('customer_login');
+    $loginName = trim((string) $_POST['tenDangNhap']);
+    $plainPassword = (string) $_POST['matKhau'];
+    if (!auth_rate_limit('customer-login:' . strtolower($loginName))) {
+        http_response_code(429);
+        $row_login = null;
+        echo "<script>alert('Bạn đã thử đăng nhập quá nhiều lần. Vui lòng thử lại sau.');</script>";
+    } else {
+        $stmt = $conn->prepare('SELECT * FROM khachhang WHERE TenDangNhap = ? LIMIT 1');
+        $stmt->bind_param('s', $loginName);
+        $stmt->execute();
+        $row_login = $stmt->get_result()->fetch_assoc();
+    }
 
-    $result = mysqli_query($conn, $sql_login);
-
-    $row_login = mysqli_fetch_array($result);
-
-    $count = mysqli_num_rows($result);
-
-    if ($count > 0) {
+    // Guest checkout accounts are passwordless records for orders, never a login.
+    if ($row_login && (int) ($row_login['is_guest'] ?? 0) !== 1 && password_matches_and_upgrade(
+        $conn,
+        (int) $row_login['ID_KhachHang'],
+        $plainPassword,
+        (string) $row_login['MatKhau']
+    )) {
+        auth_rate_limit_reset('customer-login:' . strtolower($loginName));
+        // Guest ids used by this browser, captured before the session id is regenerated.
+        $guestSessionIds = [
+            (string) ($_SESSION['chat_current_session_id'] ?? ''),
+            (string) ($_SESSION['chat_session_id'] ?? ''),
+            (string) session_id(),
+        ];
+        session_regenerate_id(true);
         $_SESSION['user'] = $row_login['TenDangNhap'];
         $_SESSION['IDNguoiDung'] = $row_login['ID_KhachHang'];
-        
-        // Check role and redirect accordingly - check if Role column exists first
-        $checkCol = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khachhang' AND COLUMN_NAME = 'Role'");
-        $colExists = false;
-        if ($checkCol) {
-            $colRow = mysqli_fetch_assoc($checkCol);
-            $colExists = intval($colRow['c']) > 0;
-        }
-        if (!$colExists) {
-            @mysqli_query($conn, "ALTER TABLE `khachhang` ADD `Role` ENUM('customer','shipper','manager','admin') NOT NULL DEFAULT 'customer' AFTER `DiaChi`");
+
+        // Keep the guest chat, booking and browsing history on the account (fail-open).
+        try {
+            require_once dirname(__DIR__) . '/Services/ChatSessionService.php';
+            require_once dirname(__DIR__) . '/Services/CustomerScoringService.php';
+            $loginUserId = (int) $row_login['ID_KhachHang'];
+            if (chat_session_claim_guest_history(app_pdo(), $loginUserId, $guestSessionIds) > 0) {
+                CustomerScoringService::refreshQuietly($loginUserId, null);
+            }
+        } catch (Throwable $claimError) {
+            error_log('Login guest history merge failed: ' . $claimError->getMessage());
         }
         
         // Check if user is shipper and if approved
@@ -31,21 +53,11 @@ if (isset($_POST['tenDangNhap']) && isset($_POST['matKhau']) && $_SERVER['REQUES
         
         // If shipper, check if approved
         if ($role === 'shipper') {
-            @mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `shipper_requests` (
-                `id` INT AUTO_INCREMENT PRIMARY KEY,
-                `user_id` INT NOT NULL,
-                `license` VARCHAR(50) NOT NULL,
-                `vehicle` VARCHAR(50) NOT NULL,
-                `note` TEXT NULL,
-                `status` ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
-                `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                INDEX idx_user_id (user_id),
-                INDEX idx_status (status)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-            
-            $shipper_check = mysqli_query($conn, "SELECT status FROM shipper_requests WHERE user_id = " . $row_login['ID_KhachHang'] . " ORDER BY created_at DESC LIMIT 1");
-            $shipper_row = mysqli_fetch_array($shipper_check);
+            $shipperStmt = $conn->prepare('SELECT status FROM shipper_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 1');
+            $userId = (int) $row_login['ID_KhachHang'];
+            $shipperStmt->bind_param('i', $userId);
+            $shipperStmt->execute();
+            $shipper_row = $shipperStmt->get_result()->fetch_assoc();
             
             if (!$shipper_row || $shipper_row['status'] !== 'approved') {
                 echo "<script>alert('Tài khoản shipper của bạn chưa được phê duyệt. Vui lòng đợi Admin phê duyệt.');</script>";
@@ -68,6 +80,7 @@ if (isset($_POST['tenDangNhap']) && isset($_POST['matKhau']) && $_SERVER['REQUES
         echo "<script>alert('Đăng nhập thất bại.');</script>";
     }
 }
+include("../Layouts/Head.php");
 ?>
 
 <body>
@@ -95,6 +108,8 @@ if (isset($_POST['tenDangNhap']) && isset($_POST['matKhau']) && $_SERVER['REQUES
                                     <h5 class="fw-normal mb-3 pb-3" style="letter-spacing: 1px;">Đăng nhập vào tài khoản
                                         của bạn</h5>
                                     <form method="POST">
+                                        <?php echo csrf_field(); ?>
+                                        <?php echo turnstile_widget('customer_login'); ?>
                                         <div class="form-outline mb-4">
                                             <label class="form-label" for="tenDangNhap">Tên đăng nhập</label>
                                             <input type="text" id="tenDangNhap" name="tenDangNhap"

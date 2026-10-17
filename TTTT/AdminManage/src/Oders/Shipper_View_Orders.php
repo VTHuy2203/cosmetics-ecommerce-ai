@@ -36,7 +36,7 @@ $sql_my_orders = "SELECT d.*, k.HoVaTen, k.SDT, k.DiaChi, k.Email
 $result_my_orders = mysqli_query($conn, $sql_my_orders);
 
 // Handle order acceptance
-if (isset($_GET['accept_order']) && $_GET['accept_order'] > 0) {
+if (false && isset($_GET['accept_order']) && $_GET['accept_order'] > 0) {
     $order_id = intval($_GET['accept_order']);
     mysqli_query($conn, "UPDATE donhang SET TrangThai = 2, ID_Shipper = $user_id WHERE ID_DonHang = $order_id AND TrangThai = 1");
     header('Location: Shipper_View_Orders.php?msg=accepted');
@@ -44,19 +44,11 @@ if (isset($_GET['accept_order']) && $_GET['accept_order'] > 0) {
 }
 
 // Handle delivery confirmation
-if (isset($_GET['confirm_delivery']) && $_GET['confirm_delivery'] > 0) {
+if (false && isset($_GET['confirm_delivery']) && $_GET['confirm_delivery'] > 0) {
     $order_id = intval($_GET['confirm_delivery']);
     $result_update = mysqli_query($conn, "UPDATE donhang SET TrangThai = 3 WHERE ID_DonHang = $order_id AND ID_Shipper = $user_id AND TrangThai = 2");
     
-    // Reduce product quantity when order is delivered
-    if ($result_update) {
-        $order_details = mysqli_query($conn, "SELECT ID_SanPham, SoLuong FROM donhangchitiet WHERE ID_DonHang = $order_id");
-        while ($detail = mysqli_fetch_array($order_details)) {
-            $product_id = intval($detail['ID_SanPham']);
-            $quantity = intval($detail['SoLuong']);
-            mysqli_query($conn, "UPDATE sanpham SET SoLuong = SoLuong - $quantity WHERE IDSanPham = $product_id AND SoLuong >= $quantity");
-        }
-    }
+    // Stock was already reserved at checkout; delivery must not decrement it again.
     
     header('Location: Shipper_View_Orders.php?msg=delivered');
     exit();

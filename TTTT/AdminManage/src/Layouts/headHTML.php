@@ -3,12 +3,10 @@
  * Admin Layout Head
  * Includes session start and access control
  */
-if (!isset($_SESSION)) {
-    session_start();
-}
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
 // Include admin access check (blocks shippers and ensures proper access)
-include(__DIR__ . '/Admin_Access_Check.php');
+require_once(__DIR__ . '/Admin_Access_Check.php');
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -35,8 +33,13 @@ include(__DIR__ . '/Admin_Access_Check.php');
     <script src="https://cdn.ckeditor.com/ckeditor5/40.1.0/classic/ckeditor.js"></script>
     
     <!-- Realtime WebSocket Client -->
-    <script src="/TTTT/WebBanHangMyPham/JS/websocket_client.js"></script>
+    <?php if ((app_env('REALTIME_WS_URL', '') ?? '') !== ''): ?>
+    <script src="/TTTT/WebBanHangMyPham/JS/websocket_client.js?v=<?php echo (int) @filemtime(dirname(__DIR__, 3) . '/WebBanHangMyPham/JS/websocket_client.js'); ?>"></script>
     <script>
+        window.WEBSOCKET_URL = <?php echo json_encode(app_env('REALTIME_WS_URL'), JSON_UNESCAPED_SLASHES); ?>;
+        window.REALTIME_TICKET_URL = "/TTTT/WebBanHangMyPham/src/Processing/Realtime_Ticket.php";
+        window.REALTIME_CONTEXT = "admin";
+        window.REALTIME_CSRF_TOKEN = <?php echo json_encode(csrf_token()); ?>;
         // Initialize WebSocket with admin role
         document.addEventListener('DOMContentLoaded', function() {
             <?php
@@ -58,11 +61,9 @@ include(__DIR__ . '/Admin_Access_Check.php');
                 $ws_role = 'staff';
             }
             
-            // Debug: Log role detection
-            error_log("headHTML.php: admin_role = {$admin_role}, ws_role = {$ws_role}, admin_id = " . ($admin_id ?: 'null'));
             ?>
-            console.log('🔌 headHTML.php: Initializing WebSocket with role:', '<?php echo $ws_role; ?>', 'user_id:', <?php echo $admin_id ?: 'null'; ?>);
             initRealtimeWebSocket('<?php echo $ws_role; ?>', <?php echo $admin_id ?: 'null'; ?>);
         });
     </script>
+    <?php endif; ?>
 </head>

@@ -63,7 +63,7 @@ if (!$result) {
                                             echo ' <td>' . $stt . '</td>';
                                             echo ' <td class="text-center"> <a class="btn btn-success">Thành Công</a>' . '</td>';
                                             echo ' <td class="text-center"> <a href="View_Oder_Detail.php?oder_id='.$row['ID_DonHang'].'&view=success" class="btn btn-primary">Xem Chi Tiết</a>' . '</td>';
-                                            echo ' <td class="text-center"> <a href="Delete_Oder.php?del_oder_id='.$row['ID_DonHang'].'&view=success" class="btn btn-danger">Hủy</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_cancel_order_form((int) $row['ID_DonHang'], 'success') . '</td>';
                                             echo ' <td>' . $row['HoVaTen'] . '</td>';
                                             echo ' <td>' . $row['SDT'] . '</td>';
                                             echo ' <td>' . $row['GhiChu'] . '</td>';

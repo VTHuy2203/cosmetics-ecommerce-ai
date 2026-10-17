@@ -8,11 +8,7 @@
 ob_start();
 
 include("../DB_Connect.php");
-
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
 // Check if user is logged in and is an employee
 if (!isset($_SESSION['user']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'employee') {
@@ -23,33 +19,37 @@ if (!isset($_SESSION['user']) || !isset($_SESSION['user_role']) || $_SESSION['us
 
 // Check if employee is approved
 $user_id = $_SESSION['IDNguoiDung'];
-$employee_check = mysqli_query($conn, "SELECT status FROM shipper_requests WHERE user_id = $user_id AND status = 'approved' ORDER BY created_at DESC LIMIT 1");
-if (!$employee_check || mysqli_num_rows($employee_check) == 0) {
+$employeeCheck = $conn->prepare(
+    "SELECT status FROM shipper_requests WHERE user_id = ? AND requested_role = 'employee' AND status = 'approved' ORDER BY created_at DESC LIMIT 1"
+);
+$employeeCheck->bind_param('i', $user_id);
+$employeeCheck->execute();
+if (!$employeeCheck->get_result()->fetch_assoc()) {
     ob_end_clean();
     header("Location: ../View/index.php?error=not_approved");
     exit();
 }
 
 // Check if order ID and approve flag are provided
-if (!isset($_GET['order_id']) || !isset($_GET['approve']) || $_GET['approve'] != '1') {
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST' || !isset($_POST['order_id'])) {
     ob_end_clean();
     header("Location: ../View/Employee_Customer_List.php?error=invalid_request");
     exit();
 }
 
-$order_id = intval($_GET['order_id']);
+require_csrf();
+$order_id = (int) $_POST['order_id'];
 
 // Get order details first
-$sql_order = "SELECT * FROM donhang WHERE ID_DonHang = '$order_id' AND (TrangThai = '0' OR TrangThai = 0)";
-$result_order = mysqli_query($conn, $sql_order);
-
-if (!$result_order || mysqli_num_rows($result_order) == 0) {
+$orderStatement = $conn->prepare('SELECT * FROM donhang WHERE ID_DonHang = ? AND TrangThai = 0');
+$orderStatement->bind_param('i', $order_id);
+$orderStatement->execute();
+$order_row = $orderStatement->get_result()->fetch_assoc();
+if (!$order_row) {
     ob_end_clean();
     header("Location: ../View/Employee_Customer_List.php?error=order_not_found");
     exit();
 }
-
-$order_row = mysqli_fetch_array($result_order);
 
 // Get order info for notifications
 $customer_name = $order_row['HoVaTen'] ?? 'Khách hàng';
@@ -62,22 +62,13 @@ if (isset($_SESSION['HoVaTen'])) {
 }
 
 // Approve the order - update TrangThai to 1 (Chuẩn Bị)
-$sql_update = "UPDATE donhang SET TrangThai = '1' WHERE ID_DonHang = '$order_id'";
-$result_update = mysqli_query($conn, $sql_update);
+$updateOrder = $conn->prepare('UPDATE donhang SET TrangThai = 1 WHERE ID_DonHang = ? AND TrangThai = 0');
+$updateOrder->bind_param('i', $order_id);
+$updateOrder->execute();
+$result_update = $updateOrder->affected_rows === 1;
 
 if ($result_update) {
-    // Reduce product quantity when order is approved
-    $order_details = mysqli_query($conn, "SELECT ID_SanPham, SoLuong FROM donhangchitiet WHERE ID_DonHang = '$order_id'");
-    
-    if ($order_details) {
-        while ($detail = mysqli_fetch_array($order_details)) {
-            $product_id = intval($detail['ID_SanPham']);
-            $quantity = intval($detail['SoLuong']);
-            
-            // Reduce product quantity (ensure it doesn't go below 0)
-            mysqli_query($conn, "UPDATE sanpham SET SoLuong = SoLuong - $quantity WHERE IDSanPham = $product_id AND SoLuong >= $quantity");
-        }
-    }
+    // Stock was already reserved at checkout; approval must not decrement it again.
     
     // CRITICAL: Send WebSocket notifications to Admin, Shipper, and Customer
     $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
@@ -158,9 +149,6 @@ if ($result_update) {
             error_log("Employee_Approve_Order.php: ❌ EXCEPTION sending WebSocket notifications: " . $e->getMessage());
         }
     }
-    
-    // Add a small delay to ensure queue file is written before redirect
-    usleep(100000); // 100ms delay
     
     // Clear any output buffer and redirect
     ob_end_clean();

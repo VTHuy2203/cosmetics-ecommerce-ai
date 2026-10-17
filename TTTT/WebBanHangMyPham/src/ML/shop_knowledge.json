@@ -2,22 +2,22 @@
   "shop_info": {
     "name": "Mơ Shop",
     "working_hours": {
-      "weekdays": "8:00 - 21:00 (Thứ 2 - Thứ 7)",
-      "weekend": "9:00 - 18:00 (Chủ Nhật)"
+      "weekdays": "Chưa cấu hình",
+      "weekend": "Chưa cấu hình"
     },
     "staff": {
-      "total_employees": 8,
-      "consultants": 5,
-      "shippers": 3
+      "total_employees": null,
+      "consultants": null,
+      "shippers": null
     },
-    "address": "Thôn Tân Lập, xã Ealy, huyện Sông Hinh, tỉnh Phú Yên, Việt Nam",
-    "hotline": "+84325324064",
-    "email": "contact@moshop.vn",
-    "website": "www.moshop.vn",
+    "address": "Chưa cấu hình",
+    "hotline": "Chưa cấu hình",
+    "email": "Chưa cấu hình",
+    "website": "Chưa cấu hình",
     "policies": {
       "return": "Đổi trả trong 7 ngày",
-      "shipping": "Freeship đơn từ 500.000đ",
-      "payment": ["COD", "Chuyển khoản", "MoMo", "ZaloPay"]
+      "shipping": "Phí vận chuyển do quản trị viên cấu hình theo khu vực và khối lượng; hệ thống tính mức đang có hiệu lực tại checkout",
+      "payment": ["COD", "Chuyển khoản QR qua SePay", "Số dư cửa hàng"]
     }
   },
   "faqs": [
@@ -47,11 +47,11 @@
     },
     {
       "question": "Sản phẩm có an toàn cho bà bầu không?",
-      "answer": "Bà bầu nên tránh: Retinol, Salicylic Acid nồng độ cao, Hydroquinone. Các thành phần an toàn: Vitamin C, Hyaluronic Acid, Niacinamide. Hãy hỏi bác sĩ trước khi sử dụng."
+      "answer": "Thông tin tư vấn tại shop không thay thế ý kiến y khoa. Khi mang thai hoặc cho con bú, hãy đưa bảng thành phần sản phẩm cho bác sĩ/sản khoa xác nhận trước khi sử dụng; chatbot không kết luận sản phẩm nào an toàn cho từng người."
     },
     {
       "question": "Cách phân biệt hàng thật giả?",
-      "answer": "Mơ Shop cam kết 100% hàng chính hãng. Bạn có thể kiểm tra: 1) Tem chống hàng giả, 2) Mã QR trên sản phẩm, 3) Bill mua hàng từ shop. Nếu nghi ngờ, liên hệ hotline để xác minh."
+      "answer": "Hãy kiểm tra tem, mã lô, hóa đơn và thông tin nhà phân phối được công bố trên trang sản phẩm. Nếu nghi ngờ nguồn gốc, ngừng sử dụng và liên hệ nhân viên hỗ trợ để đối chiếu chứng từ."
     },
     {
       "question": "Chính sách đổi trả như thế nào?",
@@ -89,4 +89,3 @@
     }
   }
 }
-

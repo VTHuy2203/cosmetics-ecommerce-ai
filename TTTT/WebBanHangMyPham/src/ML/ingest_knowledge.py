@@ -3,16 +3,18 @@
 
 import os
 import json
-from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
+from pathlib import Path
 import chromadb
 from chromadb.config import Settings
+from embedding import MODEL_NAME, create_embedder
+from rag_config import KNOWLEDGE_COLLECTION, KNOWLEDGE_INDEX_VERSION
+from env_loader import load_project_env
 
 os.environ["TRANSFORMERS_NO_TORCHVISION"] = "1"
-load_dotenv()
+load_project_env(__file__)
 
-CHROMA_DIR = os.getenv("CHROMA_DIR", r"D:\TTTT1\TTTT\WebBanHangMyPham\src\RAG\chroma_cosmetics")
-EMB_MODEL_NAME = os.getenv("EMB_MODEL", "BAAI/bge-m3")
+CHROMA_DIR = os.getenv("CHROMA_DIR", str(Path(__file__).resolve().parent.parent / "RAG" / "chroma_cosmetics"))
+EMB_MODEL_NAME = os.getenv("EMB_MODEL", MODEL_NAME)
 KNOWLEDGE_FILE = os.path.join(os.path.dirname(__file__), "shop_knowledge.json")
 
 os.makedirs(CHROMA_DIR, exist_ok=True)
@@ -41,7 +43,7 @@ Phương thức thanh toán: {', '.join(info['policies']['payment'])}"""
     docs.append({
         "id": "shop_info_general",
         "doc": shop_doc,
-        "meta": {"type": "shop_info", "category": "general"}
+            "meta": {"type": "shop_info", "category": "general", "index_version": KNOWLEDGE_INDEX_VERSION}
     })
     
     return docs
@@ -54,7 +56,7 @@ def build_faq_docs(faqs):
         docs.append({
             "id": f"faq_{i}",
             "doc": doc,
-            "meta": {"type": "faq", "question": faq['question'][:100]}
+            "meta": {"type": "faq", "question": faq['question'][:100], "index_version": KNOWLEDGE_INDEX_VERSION}
         })
     return docs
 
@@ -69,7 +71,7 @@ Nên tránh: {', '.join(info['avoid'])}"""
         docs.append({
             "id": f"skin_type_{key}",
             "doc": doc,
-            "meta": {"type": "skin_type", "skin": key, "name": info['name']}
+            "meta": {"type": "skin_type", "skin": key, "name": info['name'], "index_version": KNOWLEDGE_INDEX_VERSION}
         })
     return docs
 
@@ -78,7 +80,7 @@ def main():
     knowledge = load_knowledge()
     
     print("Loading embed model:", EMB_MODEL_NAME)
-    embedder = SentenceTransformer(EMB_MODEL_NAME)
+    embedder = create_embedder(EMB_MODEL_NAME)
     
     # Build all documents
     all_docs = []
@@ -94,15 +96,18 @@ def main():
     )
     
     # Create or get knowledge collection
-    col = client.get_or_create_collection("shop_knowledge")
+    col = client.get_or_create_collection(KNOWLEDGE_COLLECTION)
     
     # Prepare data
     ids = [d['id'] for d in all_docs]
     docs = [d['doc'] for d in all_docs]
     metas = [d['meta'] for d in all_docs]
     
+    stale = sorted(set(col.get(include=[]).get("ids", [])) - set(ids))
+    if stale:
+        col.delete(ids=stale)
     print("Encoding documents...")
-    embs = embedder.encode(docs, batch_size=16, normalize_embeddings=True).tolist()
+    embs = embedder.encode(docs, batch_size=16, normalize_embeddings=True)
     
     print("Upserting to ChromaDB...")
     col.upsert(ids=ids, documents=docs, embeddings=embs, metadatas=metas)
@@ -114,4 +119,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

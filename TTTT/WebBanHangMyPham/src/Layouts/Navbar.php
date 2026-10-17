@@ -4,12 +4,14 @@
         <div class="container d-flex justify-content-center">
             <div class="row w-100" id="nav-respon-btn-search">
                 <div class="col-9 nav-search d-none" id="nav-respon-search">
-                    <div class="input-group">
-                        <input id="timkiemsanpham_mini" type="text" class="form-control search-header" placeholder="Tìm"
-                            aria-describedby="basic-addon2">
-                        <span onclick="TimKiemMini()" class="input-group-text icon-search-header" id="basic-addon2"><i
-                                class="fa-solid fa-magnifying-glass"></i></span>
-                    </div>
+                    <form class="input-group" method="get" action="View_Product.php" role="search">
+                        <input id="timkiemsanpham_mini" name="search_like" type="search" class="form-control search-header"
+                            value="<?php echo htmlspecialchars(trim((string) ($_GET['search_like'] ?? '')), ENT_QUOTES, 'UTF-8'); ?>"
+                            placeholder="Tìm sản phẩm" aria-label="Tìm sản phẩm" maxlength="100" required>
+                        <button class="input-group-text icon-search-header" type="submit" aria-label="Tìm kiếm">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                        </button>
+                    </form>
                 </div>
                 <!-- toggle btn -->
                 <div class="col-3 d-flex justify-content-end">
@@ -77,14 +79,3 @@
         </div>
     </nav>
 </section>
-<script>
-    function TimKiemMini() {
-        var key_search = document.getElementById("timkiemsanpham_mini").value;
-
-        if (key_search == "") {
-            alert("Vui Lòng Nhập Từ Khóa!");
-        } else {
-            window.location.href = "View_Product.php?search_like=" + key_search;
-        }
-    }
-</script>

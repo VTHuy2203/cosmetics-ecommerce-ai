@@ -44,6 +44,7 @@ include("../Layouts/Head.php");
         <div class="card border-0 text-start">
             <div class="card-body">
                 <form id="contactForm" method="POST" action="../Processing/Process_Contact.php">
+                    <?php echo csrf_field(); ?>
                     <h4 class="p-2 mb-3">Liên Hệ Với Chúng Tôi</h4>
                     
                     <?php if (isset($_GET['success']) && $_GET['success'] == '1'): ?>

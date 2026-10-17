@@ -1,27 +1,37 @@
 # ingest_rag.py
 import os, re
-from dotenv import load_dotenv
+from pathlib import Path
 import mysql.connector
 from mysql.connector import Error as MySQLError
-from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.config import Settings
+from live_catalog import stale_vector_ids
+from embedding import MODEL_NAME, create_embedder
+from rag_config import CATALOG_INDEX_VERSION, PRODUCT_COLLECTION
+from env_loader import load_project_env
 
 # Không cần torchvision => tránh lỗi Windows
 os.environ["TRANSFORMERS_NO_TORCHVISION"] = "1"
 
-load_dotenv()
+load_project_env(__file__)
 
 # ---- ENV ----
-DB_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+def required_env(name):
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required database environment: {name}")
+    return value
+
+DB_HOST = required_env("MYSQL_HOST")
 DB_PORT = int(os.getenv("MYSQL_PORT", "3306"))
-DB_USER = os.getenv("MYSQL_USER", "root")
+DB_USER = required_env("MYSQL_USER")
 DB_PASS = os.getenv("MYSQL_PASSWORD", "")
-DB_NAME = os.getenv("MYSQL_DB", "webmipham1")
+DB_NAME = required_env("MYSQL_DB")
 DB_CHARSET = os.getenv("MYSQL_CHARSET", "utf8mb4")
 
-CHROMA_DIR = os.getenv("CHROMA_DIR", r"D:\TTTT1\TTTT\WebBanHangMyPham\src\RAG\chroma_cosmetics")
-EMB_MODEL_NAME = os.getenv("EMB_MODEL", "BAAI/bge-m3")
+CHROMA_DIR = os.getenv("CHROMA_DIR", str(Path(__file__).resolve().parent.parent / "RAG" / "chroma_cosmetics"))
+EMB_MODEL_NAME = os.getenv("EMB_MODEL", MODEL_NAME)
+INDEX_VERSION = CATALOG_INDEX_VERSION
 
 os.makedirs(CHROMA_DIR, exist_ok=True)
 
@@ -59,7 +69,7 @@ def read_products():
                        sp.MoTaChiTiet,
                        dm.TenDanhMuc   AS DanhMuc,
                        th.TenThuongHieu AS ThuongHieu,
-                       COALESCE(sp.Gia, sp.GiaTien) AS Gia
+                       sp.GiaTien AS Gia
                 FROM sanpham sp
                 LEFT JOIN danhmuc dm     ON sp.IDDanhMuc = dm.IDDanhMuc
                 LEFT JOIN thuonghieu th  ON sp.IDThuongHieu = th.IDThuongHieu
@@ -72,7 +82,7 @@ def read_products():
                        sp.MoTaChiTiet,
                        sp.IDDanhMuc     AS DanhMuc,
                        sp.IDThuongHieu  AS ThuongHieu,
-                       COALESCE(sp.Gia, sp.GiaTien) AS Gia
+                       sp.GiaTien AS Gia
                 FROM sanpham sp
                 ORDER BY sp.IDSanPham DESC
             """
@@ -98,7 +108,7 @@ def build_doc(row):
 
 def main():
     print("Loading embed model:", EMB_MODEL_NAME)
-    embedder = SentenceTransformer(EMB_MODEL_NAME)
+    embedder = create_embedder(EMB_MODEL_NAME)
 
     print("Reading products from MySQL ...")
     rows = read_products()
@@ -107,7 +117,7 @@ def main():
     client = chromadb.PersistentClient(
         path=CHROMA_DIR, settings=Settings(anonymized_telemetry=False)
     )
-    col = client.get_or_create_collection("cosmetics_products")
+    col = client.get_or_create_collection(PRODUCT_COLLECTION)
 
     ids, docs, metas = [], [], []
     for r in rows:
@@ -119,13 +129,21 @@ def main():
             "DanhMuc": r.get("DanhMuc"),
             "ThuongHieu": r.get("ThuongHieu"),
             "Gia": r.get("Gia"),
+            "index_version": INDEX_VERSION,
         })
 
-    print("Encoding ...")
-    embs = embedder.encode(docs, batch_size=64, normalize_embeddings=True).tolist()
+    current_ids = set(ids)
+    indexed_ids = set(col.get(include=[]).get("ids", []))
+    stale_ids = stale_vector_ids(indexed_ids, current_ids)
+    if stale_ids:
+        print("Deleting stale products:", len(stale_ids))
+        col.delete(ids=stale_ids)
 
-    print("Upsert to Chroma ...")
-    col.upsert(ids=ids, documents=docs, embeddings=embs, metadatas=metas)
+    if docs:
+        print("Encoding ...")
+        embs = embedder.encode(docs, batch_size=64, normalize_embeddings=True)
+        print("Upsert to Chroma ...")
+        col.upsert(ids=ids, documents=docs, embeddings=embs, metadatas=metas)
     print("Done. Indexed:", len(ids))
 
 if __name__ == "__main__":

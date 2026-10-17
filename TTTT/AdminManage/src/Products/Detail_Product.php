@@ -1,19 +1,20 @@
 <?php
+$product_id = filter_input(INPUT_GET, 'product_id', FILTER_VALIDATE_INT);
+if (!$product_id || $product_id < 1) {
+    header('Location: Manage_Product.php');
+    exit();
+}
+
 include("../Layouts/headHTML.php");
 include("../DB_Connect.php");
 
-if (isset($_GET['product_id'])) {
-    $product_id = $_GET['product_id'];
-    $sql = "SELECT * from sanpham where IDSanPham = '$product_id'";
-    $result = mysqli_query($conn, $sql);
-    $row = mysqli_fetch_array($result);
-
-    // Kiểm tra nếu có lỗi trong quá trình truy vấn
-    if (!$result) {
-        die("Có lỗi xảy ra: " . mysqli_error($conn));
-    }
-} else {
-    header('Location: Manage_Product.php');
+$statement = $conn->prepare('SELECT TenSanPham, MoTaChiTiet FROM sanpham WHERE IDSanPham = ? LIMIT 1');
+$statement->bind_param('i', $product_id);
+$statement->execute();
+$row = $statement->get_result()->fetch_assoc();
+if (!$row) {
+    http_response_code(404);
+    echo 'Không tìm thấy sản phẩm.';
     exit();
 }
 ?>
@@ -36,15 +37,15 @@ if (isset($_GET['product_id'])) {
                 <!-- Begin Page Content -->
                 <div class="container-fluid">
                     <!-- Page Heading -->
-                    <h1 class="h3 mb-2 text-gray-800">Mô Tả Chi Tiết</h1>
+                    <h1 class="h3 mb-2 text-gray-800">Chi Tiết Sản Phẩm</h1>
 
                     <!-- DataTales Example -->
                     <div class="card shadow mb-4">
                         <div class="card-body">
-                            <form action="your_processing_script.php" method="POST">
-                                <!-- CKEditor textarea -->
-                                <textarea id="editor" name="description"><?php echo $row['MoTaChiTiet']; ?></textarea>
-                            </form>
+                            <h5><?php echo htmlspecialchars((string) $row['TenSanPham'], ENT_QUOTES, 'UTF-8'); ?></h5>
+                            <div class="border rounded p-3 bg-light" style="white-space: pre-wrap;"><?php
+                                echo htmlspecialchars((string) $row['MoTaChiTiet'], ENT_QUOTES, 'UTF-8');
+                            ?></div>
                         </div>
                         <div class="card-body">
                             <a href="Manage_Product.php" class="btn btn-primary">Quay lại</a>
@@ -64,15 +65,6 @@ if (isset($_GET['product_id'])) {
         <?php include("../Layouts/Link.php"); ?>
     </div>
 
-    <!-- CKEditor Script -->
-    <script src="https://cdn.ckeditor.com/ckeditor5/40.1.0/classic/ckeditor.js"></script>
-    <script>
-        ClassicEditor
-            .create(document.querySelector('#editor'))
-            .catch(error => {
-                console.error(error);
-            });
-    </script>
 </body>
 
 </html>

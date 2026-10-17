@@ -1,0 +1,10 @@
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(?:\.git|\.github|\.runtime|\.codex-temp|deploy|docs|logs|scripts|shortcuts|tests|venv)(?:/|$) - [F,L,NC]
+</IfModule>
+
+<FilesMatch "(?i)^(?:\.env(?:\..*)?|composer\.(?:json|lock)|.*\.(?:sql|sqlite3?|db|log|ya?ml|ps1|md|docx))$">
+    Require all denied
+</FilesMatch>

@@ -13,6 +13,8 @@ if (typeof RealtimeWebSocket === 'undefined') {
         this.reconnectDelay = 3000;
         this.heartbeatInterval = 30000; // 30 seconds
         this.heartbeatTimer = null;
+        this.ticketRefreshTimer = null;
+        this.subscriptionRequest = null;
         
         // Configuration
         this.wsUrl = config.wsUrl || 'ws://localhost:8080';
@@ -20,6 +22,9 @@ if (typeof RealtimeWebSocket === 'undefined') {
         this.userId = config.userId || null;
         // Sử dụng kênh từ cấu hình nếu được cung cấp, nếu không thì sử dụng thông tin từ vai trò.
         this.channel = config.channel || this.getChannelForRole(this.role);
+        this.ticketUrl = config.ticketUrl || '';
+        this.ticketContext = config.ticketContext || 'customer';
+        this.csrfToken = config.csrfToken || '';
         
         console.log('🔧 RealtimeWebSocket initialized:', {
             role: this.role,
@@ -212,6 +217,9 @@ if (typeof RealtimeWebSocket === 'undefined') {
                     if (message.action === 'subscribed') {
                         console.log(`✅ Successfully subscribed to ${message.channel}`);
                         this.isSubscribed = true;
+                        if (this.ticketRefreshTimer) clearTimeout(this.ticketRefreshTimer);
+                        const refreshIn = Math.max(15000, ((Number(message.expires_at) || 0) * 1000) - Date.now() - 15000);
+                        this.ticketRefreshTimer = setTimeout(() => this.subscribe(), refreshIn);
                         if (message.channel === this.channel) {
                             console.log('✅ Subscription confirmed for correct channel:', this.channel);
                         }
@@ -289,7 +297,7 @@ if (typeof RealtimeWebSocket === 'undefined') {
         }
     }
     
-    subscribe() {
+    async subscribe() {
         if (!this.ws) {
             console.error('❌ Cannot subscribe: WebSocket is null');
             return;
@@ -306,20 +314,29 @@ if (typeof RealtimeWebSocket === 'undefined') {
             return;
         }
         
-        const subscribeMessage = {
-            action: 'subscribe',
-            channel: this.channel,
-            role: this.role,
-            user_id: this.userId
-        };
-        
-        console.log('📤 Sending subscribe message:', subscribeMessage);
-        
+        if (!this.ticketUrl || !this.csrfToken || this.subscriptionRequest) {
+            return;
+        }
         try {
-            this.ws.send(JSON.stringify(subscribeMessage));
-            console.log('✅ Subscribe message sent successfully');
+            this.subscriptionRequest = fetch(this.ticketUrl, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json', 'X-CSRF-Token': this.csrfToken},
+                body: JSON.stringify({context: this.ticketContext})
+            });
+            const response = await this.subscriptionRequest;
+            const payload = await response.json().catch(() => null);
+            if (!response.ok || !payload || payload.ok !== true || typeof payload.ticket !== 'string') {
+                throw new Error('Realtime authorization is unavailable.');
+            }
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({action: 'subscribe', ticket: payload.ticket}));
+            }
         } catch (error) {
-            console.error('❌ Error sending subscribe message:', error);
+            this.isSubscribed = false;
+            console.error('❌ Realtime subscription failed:', error.message || error);
+        } finally {
+            this.subscriptionRequest = null;
         }
     }
     
@@ -335,6 +352,10 @@ if (typeof RealtimeWebSocket === 'undefined') {
         if (this.heartbeatTimer) {
             clearInterval(this.heartbeatTimer);
             this.heartbeatTimer = null;
+        }
+        if (this.ticketRefreshTimer) {
+            clearTimeout(this.ticketRefreshTimer);
+            this.ticketRefreshTimer = null;
         }
     }
     
@@ -394,6 +415,17 @@ if (typeof RealtimeWebSocket === 'undefined') {
     
     handleNotification(message) {
         console.log('🔔 handleNotification called with:', message);
+
+        // Publish a stable browser event so each UI (Admin, Staff, Customer)
+        // can render notifications in its own layout without depending on the
+        // legacy toast implementation in this large shared client.
+        try {
+            window.dispatchEvent(new CustomEvent('moshop:realtime-notification', {
+                detail: message
+            }));
+        } catch (eventError) {
+            console.error('Could not dispatch realtime notification event:', eventError);
+        }
         
         const { type, title, message: msg, data, sound, timestamp } = message;
         
@@ -1940,6 +1972,9 @@ function initRealtimeWebSocket(role = 'user', userId = null) {
             channel: channel,
             role: role,
             userId: userId,
+            ticketUrl: window.REALTIME_TICKET_URL || '',
+            ticketContext: window.REALTIME_CONTEXT || 'customer',
+            csrfToken: window.REALTIME_CSRF_TOKEN || '',
             onConnect: () => {
                 console.log('✅ Realtime WebSocket connected successfully');
                 console.log('📊 Connection details:', {

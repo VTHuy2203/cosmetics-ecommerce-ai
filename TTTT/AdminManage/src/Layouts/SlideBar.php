@@ -205,6 +205,22 @@
 
     <!-- Nav Item - bình luận -->
     <li class="nav-item">
+        <a class="nav-link" href="../Notifications/Notification_Center.php">
+            <i class="fas fa-fw fa-bell"></i>
+            <span>Trung Tâm Thông Báo</span>
+        </a>
+    </li>
+
+    <!-- Nav Item - bình luận -->
+    <li class="nav-item">
+        <a class="nav-link" href="../Marketing/Manage_Marketing.php">
+            <i class="fas fa-fw fa-bullhorn"></i>
+            <span>Voucher & Thông Báo</span>
+        </a>
+    </li>
+
+    <!-- Nav Item - bình luận -->
+    <li class="nav-item">
         <a class="nav-link collapsed" href="#" data-toggle="collapse" data-target="#collapse-Binh-Luan"
             aria-expanded="true" aria-controls="collapse-Binh-Luan">
             <i class="fas fa-fw fa-cog"></i>
@@ -254,11 +270,23 @@
     <div class="sidebar-heading">
         Tài khoản
     </div>
+    <?php if ($is_admin_or_manager): ?>
+    <li class="nav-item"><a class="nav-link" href="../Oders/Shipping_Settings.php"><i class="fas fa-fw fa-shipping-fast"></i><span>Phí vận chuyển</span></a></li>
     <li class="nav-item">
-        <a class="nav-link" href="../Processing/Admin_Logout.php">
-            <i class="fas fa-fw fa-sign-out-alt"></i>
-            <span>Đăng xuất</span>
+        <a class="nav-link" href="../Users/Admin_Profile.php">
+            <i class="fas fa-fw fa-user-cog"></i>
+            <span>Quản lý tài khoản</span>
         </a>
+    </li>
+    <?php endif; ?>
+    <li class="nav-item">
+        <form method="post" action="../Processing/Admin_Logout.php" class="m-0">
+            <?php echo csrf_field(); ?>
+            <button type="submit" class="nav-link border-0 bg-transparent w-100 text-left">
+                <i class="fas fa-fw fa-sign-out-alt"></i>
+                <span>Đăng xuất</span>
+            </button>
+        </form>
     </li>
 
 </ul>

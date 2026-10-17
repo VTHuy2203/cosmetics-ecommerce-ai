@@ -4,43 +4,49 @@
  * Handles deletion of chat appointments (usually past ones)
  */
 
-session_start();
-include("../DB_Connect.php");
-
-// Check if user is logged in and is an employee
-if (!isset($_SESSION['user']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'employee') {
-    die(json_encode(['ok' => false, 'error' => 'Unauthorized']));
+require_once dirname(__DIR__, 3) . '/config/security.php';
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    header('Allow: POST');
+    json_response(['ok' => false, 'error' => 'method_not_allowed'], 405);
 }
+require_csrf(true);
 
 // Get appointment ID
 $id = isset($_POST['id']) ? intval($_POST['id']) : 0;
 if ($id <= 0) {
-    die(json_encode(['ok' => false, 'error' => 'Invalid ID']));
+    json_response(['ok' => false, 'error' => 'invalid_id'], 422);
 }
 
-// Use PDO for chat tables
 try {
-    $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-    $pdo = new PDO($dsn, "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
-
-    // Check if appointment exists
-    $stmt = $pdo->prepare("SELECT id FROM chat_appointments WHERE id = ?");
-    $stmt->execute([$id]);
-    if (!$stmt->fetch()) {
-        die(json_encode(['ok' => false, 'error' => 'Appointment not found']));
+    $pdo = app_pdo();
+    $employeeId = filter_var($_SESSION['IDNguoiDung'] ?? null, FILTER_VALIDATE_INT);
+    $username = trim((string) ($_SESSION['user'] ?? ''));
+    if (!$employeeId || $username === '') {
+        json_response(['ok' => false, 'error' => 'unauthorized'], 401);
     }
 
-    // Delete appointment
-    $stmt = $pdo->prepare("DELETE FROM chat_appointments WHERE id = ?");
+    // Session roles can become stale. Authorize this destructive action using
+    // the current database identity and role on every request.
+    $roleStatement = $pdo->prepare(
+        'SELECT Role FROM khachhang WHERE ID_KhachHang = ? AND TenDangNhap = ? LIMIT 1'
+    );
+    $roleStatement->execute([(int) $employeeId, $username]);
+    if ($roleStatement->fetchColumn() !== 'employee') {
+        json_response(['ok' => false, 'error' => 'forbidden'], 403);
+    }
+
+    // The employee screen exposes deletion only for past appointments. Keep
+    // that state rule in the mutation itself so a forged ID cannot delete a
+    // future booking.
+    $stmt = $pdo->prepare('DELETE FROM chat_appointments WHERE id = ? AND appt_at < NOW()');
     $stmt->execute([$id]);
+    if ($stmt->rowCount() !== 1) {
+        json_response(['ok' => false, 'error' => 'appointment_not_found_or_not_past'], 404);
+    }
 
-    echo json_encode(['ok' => true, 'message' => 'Đã xóa lịch hẹn thành công']);
+    json_response(['ok' => true, 'message' => 'Đã xóa lịch hẹn thành công']);
 
-} catch (Exception $e) {
+} catch (Throwable $e) {
     error_log("Employee_Delete_Appointment.php: Error: " . $e->getMessage());
-    die(json_encode(['ok' => false, 'error' => 'Database error']));
+    json_response(['ok' => false, 'error' => 'database_error'], 500);
 }
-?>

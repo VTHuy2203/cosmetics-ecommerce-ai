@@ -1,119 +1,90 @@
 <?php
-include("../DB_Connect.php");
+declare(strict_types=1);
 
-function ensurePaidColumnExists($conn) {
-	$checkSql = "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'donhang' AND COLUMN_NAME = 'DaThanhToan'";
-	$res = mysqli_query($conn, $checkSql);
-	if ($res) {
-		$row = mysqli_fetch_assoc($res);
-		if (intval($row['c']) === 0) {
-			$alter = "ALTER TABLE `donhang` ADD `DaThanhToan` TINYINT(1) NOT NULL DEFAULT 0 AFTER `TrangThai`";
-			@mysqli_query($conn, $alter);
-		}
-	}
+require_once '../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once '../Layouts/Admin_Access_Check.php';
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    http_response_code(405);
+    exit('Method Not Allowed');
+}
+require_csrf();
+
+$adminRole = $_SESSION['admin_role'] ?? null;
+if (!in_array($adminRole, ['admin', 'manager'], true)) {
+    http_response_code(403);
+    exit('Bạn không có quyền xác nhận thanh toán.');
 }
 
-if (isset($_GET['oder_id'])) {
-	ensurePaidColumnExists($conn);
-	$oder_id = intval($_GET['oder_id']);
-	$sql = "UPDATE `donhang` SET `DaThanhToan` = '1' WHERE `ID_DonHang` = '$oder_id'";
-	$result = mysqli_query($conn, $sql);
-	
-	if ($result) {
-		// Get order info for notification
-		$order_query = mysqli_query($conn, "SELECT ID_KhachHang, HoVaTen, TongTien FROM donhang WHERE ID_DonHang = '$oder_id'");
-		$order_info = mysqli_fetch_array($order_query);
-		$customer_name = $order_info['HoVaTen'] ?? 'Khách hàng';
-		$customer_id = $order_info['ID_KhachHang'] ?? null;
-		$total_amount = $order_info['TongTien'] ?? 0;
-		
-		// Get admin/staff name who marked as paid
-		$marker_name = 'Admin';
-		if (isset($_SESSION['admin_name'])) {
-			$marker_name = $_SESSION['admin_name'];
-		} elseif (isset($_SESSION['admin_username'])) {
-			$marker_name = $_SESSION['admin_username'];
-		}
-		
-		// Send WebSocket notification about payment status update
-		$wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-		if (file_exists($wsPushFile)) {
-			try {
-				require_once($wsPushFile);
-				
-				if (function_exists('websocket_push')) {
-					// Notify Admin and Staff - payment confirmed
-					$result1 = websocket_push(
-						['admin_channel', 'staff_channel'],
-						[
-							'type' => 'order_paid',
-							'title' => 'Đơn hàng đã thanh toán',
-							'message' => "Đơn hàng #{$oder_id} của khách hàng {$customer_name} đã được {$marker_name} đánh dấu là đã thanh toán. Tổng tiền: " . number_format($total_amount, 0, ',', '.') . " đ",
-							'sound' => 'notification',
-							'data' => [
-								'order_id' => $oder_id,
-								'customer_name' => $customer_name,
-								'customer_id' => $customer_id,
-								'total_amount' => $total_amount,
-								'marker_name' => $marker_name,
-								'timestamp' => date('Y-m-d H:i:s')
-							]
-						]
-					);
-					
-					// Notify User - payment confirmed
-					if ($customer_id) {
-						$result2 = websocket_push(
-							['user_channel'],
-							[
-								'type' => 'order_paid',
-								'title' => 'Đơn hàng đã thanh toán',
-								'message' => "Đơn hàng #{$oder_id} của bạn đã được xác nhận thanh toán",
-								'sound' => 'notification',
-								'data' => [
-									'order_id' => $oder_id,
-									'customer_id' => $customer_id,
-									'total_amount' => $total_amount,
-									'timestamp' => date('Y-m-d H:i:s')
-								]
-							]
-						);
-					}
-					
-					// Notify Shipper if order is assigned
-					$result3 = websocket_push(
-						['shipper_channel'],
-						[
-							'type' => 'order_paid',
-							'title' => 'Đơn hàng đã thanh toán',
-							'message' => "Đơn hàng #{$oder_id} của khách hàng {$customer_name} đã được xác nhận thanh toán",
-							'sound' => 'notification',
-							'data' => [
-								'order_id' => $oder_id,
-								'customer_name' => $customer_name,
-								'total_amount' => $total_amount,
-								'timestamp' => date('Y-m-d H:i:s')
-							]
-						]
-					);
-					
-					if ($result1 || (isset($result2) && $result2) || $result3) {
-						error_log("Mark_Paid.php: ✅ Notifications sent successfully for order #{$oder_id}");
-					} else {
-						error_log("Mark_Paid.php: ⚠️ Notification functions returned false for order #{$oder_id}");
-					}
-				} else {
-					error_log("Mark_Paid.php: ❌ Function websocket_push not found");
-				}
-			} catch (Exception $e) {
-				error_log("Mark_Paid.php: ❌ Exception sending WebSocket notification: " . $e->getMessage());
-			}
-		} else {
-			error_log("Mark_Paid.php: ❌ WebSocket_Push.php file not found at: {$wsPushFile}");
-		}
-	}
-	
-	header('Location: All_Oders.php');
-	exit();
+$orderId = (int) ($_POST['order_id'] ?? 0);
+if ($orderId < 1) {
+    http_response_code(422);
+    exit('Đơn hàng không hợp lệ.');
 }
-?>
+
+$conn->begin_transaction();
+try {
+    $orderStatement = $conn->prepare(
+        'SELECT TrangThai, DaThanhToan, PhuongThucThanhToan, TrangThaiThanhToan,
+                HanThanhToan, TongTien
+         FROM donhang WHERE ID_DonHang = ? FOR UPDATE'
+    );
+    $orderStatement->bind_param('i', $orderId);
+    $orderStatement->execute();
+    $order = $orderStatement->get_result()->fetch_assoc();
+    if (!$order) {
+        throw new RuntimeException('Không tìm thấy đơn hàng.');
+    }
+
+    if ((int) $order['DaThanhToan'] !== 1) {
+        $paymentMethod = (string) $order['PhuongThucThanhToan'];
+        $isCodReady = $paymentMethod === 'cod' && (int) $order['TrangThai'] === 3;
+        $isQrReady = $paymentMethod === 'qr'
+            && (int) $order['TrangThai'] === 0
+            && (string) $order['TrangThaiThanhToan'] === 'pending'
+            && (empty($order['HanThanhToan']) || strtotime((string) $order['HanThanhToan']) >= time());
+        if (!$isCodReady && !$isQrReady) {
+            http_response_code(409);
+            throw new DomainException('Đơn hàng không ở trạng thái cho phép xác nhận thanh toán.');
+        }
+
+        $reference = sprintf('%s-%d-%s', strtoupper($paymentMethod), $orderId, date('YmdHis'));
+        $update = $conn->prepare(
+            "UPDATE donhang SET DaThanhToan = 1, TrangThaiThanhToan = 'paid',
+             ThanhToanLuc = NOW(), MaThamChieuThanhToan = ?
+             WHERE ID_DonHang = ? AND DaThanhToan = 0"
+        );
+        $update->bind_param('si', $reference, $orderId);
+        $update->execute();
+        if ($update->affected_rows !== 1) {
+            throw new RuntimeException('Trạng thái đơn hàng vừa thay đổi.');
+        }
+
+        $payload = json_encode([
+            'order_id' => $orderId,
+            'amount' => (int) $order['TongTien'],
+            'method' => $paymentMethod,
+            'confirmed_by' => (int) $_SESSION['admin_id'],
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $event = $conn->prepare(
+            "INSERT INTO outbox_events(event_type, aggregate_type, aggregate_id, payload)
+             VALUES ('payment.manually_confirmed', 'order', ?, ?)"
+        );
+        $aggregateId = (string) $orderId;
+        $event->bind_param('ss', $aggregateId, $payload);
+        $event->execute();
+    }
+
+    $conn->commit();
+    header('Location: All_Oders.php?payment=confirmed');
+    exit;
+} catch (DomainException $error) {
+    $conn->rollback();
+    exit($error->getMessage());
+} catch (Throwable $error) {
+    $conn->rollback();
+    error_log('Manual payment confirmation failed: ' . $error->getMessage());
+    http_response_code(500);
+    exit('Không thể xác nhận thanh toán.');
+}

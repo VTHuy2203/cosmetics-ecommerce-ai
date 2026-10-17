@@ -1,7 +1,25 @@
 <?php
-include("../Layouts/headHTML.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once '../DB_Connect.php';
+require_once '../Layouts/Admin_Access_Check.php';
+require_once dirname(__DIR__, 3) . '/config/catalog.php';
 
-include("../DB_Connect.php");
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && isset($_POST['noibat_product_id'], $_POST['noibat'])) {
+    require_csrf();
+    $productId = filter_var($_POST['noibat_product_id'], FILTER_VALIDATE_INT);
+    $featured = filter_var($_POST['noibat'], FILTER_VALIDATE_INT);
+    if ($productId === false || $productId < 1 || !in_array($featured, [0, 1], true)) {
+        http_response_code(422);
+        exit('invalid_featured_state');
+    }
+    $featuredStatement = $conn->prepare('UPDATE sanpham SET NoiBat = ? WHERE IDSanPham = ?');
+    $featuredStatement->bind_param('ii', $featured, $productId);
+    $featuredStatement->execute();
+    header('Location: Manage_Product.php', true, 303);
+    exit();
+}
+
+include("../Layouts/headHTML.php");
 
 $sql = "SELECT sanpham.IDSanPham, sanpham.TenSanPham, sanpham.IDDanhMuc, sanpham.IDThuongHieu, sanpham.SoLuong, sanpham.GiaTien, sanpham.MoTaChiTiet, sanpham.AnhSanPham, sanpham.NoiBat, sanpham.ThoiGianTao, sanpham.ThoiGianCapNhat, danhmuc.TenDanhMuc, thuonghieu.TenThuongHieu from sanpham
 INNER JOIN danhmuc on sanpham.IDDanhMuc = danhmuc.IDDanhMuc
@@ -14,20 +32,6 @@ if (!$result) {
     die("Có lỗi xảy ra: " . mysqli_error($conn));
 }
 
-//nổi bật sản phẩm
-if (isset($_GET['noibat_product_id']) && isset($_GET['noibat'])) {
-    $noibat_product_id = $_GET['noibat_product_id'];
-    $noibat = $_GET['noibat'];
-
-    $sql_noibat = "update sanpham SET NoiBat='$noibat' where IDSanPham = '$noibat_product_id'";
-
-    $result_noibat = mysqli_query($conn, $sql_noibat);
-
-    if ($result_noibat) {
-        header('Location: Manage_Product.php');
-        exit();
-    }
-}
 ?>
 
 <body id="page-top">
@@ -51,6 +55,8 @@ if (isset($_GET['noibat_product_id']) && isset($_GET['noibat'])) {
                 <!-- Begin Page Content -->
                 <div class="container-fluid">
 
+                    <?php echo catalog_delete_alert(); ?>
+
                     <!-- Page Heading -->
                     <h1 class="h3 mb-2 text-gray-800">Danh Sách Sản Phẩm</h1>
 
@@ -72,8 +78,6 @@ if (isset($_GET['noibat_product_id']) && isset($_GET['noibat'])) {
                                             <th>Giá Tiền</th>
                                             <th>Hình Ảnh</th>
                                             <th>Mô tả Chi Tiết</th>
-                                            <th>Thời Gian Tạo</th>
-                                            <th>Thời Gian Cập Nhật</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -83,11 +87,11 @@ if (isset($_GET['noibat_product_id']) && isset($_GET['noibat'])) {
                                             echo '<tr>';
                                             echo ' <td>' . $stt . '</td>';
                                             echo ' <td class="text-center"> <a href="Update_Product.php?product_id=' . $row['IDSanPham'] . '" class="btn btn-primary">Sửa</a>' . '</td>';
-                                            echo ' <td class="text-center"> <a href="Delete_Product.php?product_id=' . $row['IDSanPham'] . '" class="btn btn-danger">Xóa</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_delete_form('Delete_Product.php', 'product_id', (int) $row['IDSanPham']) . '</td>';
                                             if ($row['NoiBat'] == 0) {
-                                                echo ' <td class="text-center"> <a href="Manage_Product.php?noibat_product_id=' . $row['IDSanPham'] . '&noibat=1" class="btn btn-info">Hiện</a>' . '</td>';
+                                                echo ' <td class="text-center"><form method="post">' . csrf_field() . '<input type="hidden" name="noibat_product_id" value="' . (int) $row['IDSanPham'] . '"><input type="hidden" name="noibat" value="1"><button type="submit" class="btn btn-info">Hiện</button></form></td>';
                                             } else {
-                                                echo ' <td class="text-center"> <a href="Manage_Product.php?noibat_product_id=' . $row['IDSanPham'] . '&noibat=0" class="btn btn-success">Ẩn</a>' . '</td>';
+                                                echo ' <td class="text-center"><form method="post">' . csrf_field() . '<input type="hidden" name="noibat_product_id" value="' . (int) $row['IDSanPham'] . '"><input type="hidden" name="noibat" value="0"><button type="submit" class="btn btn-success">Ẩn</button></form></td>';
                                             }
                                             echo ' <td>' . $row['TenSanPham'] . '</td>';
                                             echo ' <td>' . $row['TenDanhMuc'] . '</td>';
@@ -102,8 +106,6 @@ if (isset($_GET['noibat_product_id']) && isset($_GET['noibat'])) {
                                             echo ' </td>';
 
                                             echo ' <td class="text-center"> <a href="Detail_Product.php?product_id=' . $row['IDSanPham'] . '" class="btn btn-info">Chi Tiết</a>' . '</td>';
-                                            echo ' <td>' . $row['ThoiGianTao'] . '</td>';
-                                            echo ' <td>' . $row['ThoiGianCapNhat'] . '</td>';
                                             echo '</tr>';
                                             $stt++;
                                         }

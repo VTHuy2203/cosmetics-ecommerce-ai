@@ -1,13 +1,28 @@
 <?php
 include("../DB_Connect.php");
-include("../Layouts/Head.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__) . '/Services/VoucherService.php';
+require_once dirname(__DIR__) . '/Services/ShippingService.php';
 
-if (isset($_SESSION['user'])) {
-	$sql_inf_user = "select * from khachhang where TenDangNhap = '" . $_SESSION['user'] . "'";
+if (empty($_SESSION['cart'])) {
+	header('Location: Cart.php');
+	exit;
+}
 
-	$result = mysqli_query($conn, $sql_inf_user);
-
-	$row_inf_user = mysqli_fetch_array($result);
+	// Guests check out with COD by typing their name, phone and address; members get them prefilled.
+	$isGuest = empty($_SESSION['user']);
+	$row_inf_user = ['ID_KhachHang' => 0, 'TenDangNhap' => '', 'HoVaTen' => '', 'Email' => '', 'SDT' => '', 'DiaChi' => ''];
+	if (!$isGuest) {
+		$userStatement = $conn->prepare('SELECT * FROM khachhang WHERE TenDangNhap = ? LIMIT 1');
+		$username = (string) $_SESSION['user'];
+		$userStatement->bind_param('s', $username);
+		$userStatement->execute();
+		$row_inf_user = $userStatement->get_result()->fetch_assoc();
+		if (!$row_inf_user) {
+			header('Location: Login.php');
+			exit;
+		}
+	}
 
 	$ID_KhachHang = $row_inf_user['ID_KhachHang'];
 	$TenDangNhap = $row_inf_user['TenDangNhap'];
@@ -15,7 +30,10 @@ if (isset($_SESSION['user'])) {
 	$Email = $row_inf_user['Email'];
 	$SDT = $row_inf_user['SDT'];
 	$DiaChi = $row_inf_user['DiaChi'];
-}
+	$shippingRegion = strtoupper(trim((string) ($_GET['shipping_region'] ?? '')));
+	try { $shippingQuote = (new ShippingService($conn))->quoteCart($_SESSION['cart'], $shippingRegion); }
+	catch (ShippingException) { header('Location: Cart.php?error=shipping_region_required'); exit; }
+include("../Layouts/Head.php");
 ?>
 
 <body>
@@ -33,29 +51,32 @@ if (isset($_SESSION['user'])) {
 							<div class="col-md-5 p-3">
 								<div class="pt-3 px-3">
 									<h5>Thông tin người mua</h5>
+									<?php if ($isGuest): ?>
+									<small class="text-muted d-block">Bạn đang mua hàng không cần tài khoản (thanh toán khi nhận hàng). Nhân viên sẽ gọi theo số điện thoại để xác nhận đơn. <a href="Login.php">Đăng nhập</a> để dùng voucher và theo dõi đơn.</small>
+									<?php endif; ?>
 								</div>
 								<div class="p-3">
-									<label class="form-label" for="form-checkout-name">Họ và tên</label>
-									<input type="text" id="form-checkout-name" class="form-control form-control-lg" value="<?php echo $HoVaTen; ?>" />
+									<label class="form-label" for="form-checkout-name">Họ và tên <span class="text-danger">*</span></label>
+									<input type="text" id="form-checkout-name" class="form-control form-control-lg" maxlength="50" autocomplete="name" required value="<?php echo htmlspecialchars((string) $HoVaTen, ENT_QUOTES, 'UTF-8'); ?>" />
 								</div>
 								<div class="p-3">
-									<label class="form-label" for="form-checkout-email">Email</label>
-									<input type="email" id="form-checkout-email" class="form-control form-control-lg" value="<?php echo $Email; ?>" />
+									<label class="form-label" for="form-checkout-email">Email<?php echo $isGuest ? ' <small class="text-muted">(không bắt buộc)</small>' : ' <span class="text-danger">*</span>'; ?></label>
+									<input type="email" id="form-checkout-email" class="form-control form-control-lg" maxlength="100" autocomplete="email" value="<?php echo htmlspecialchars((string) $Email, ENT_QUOTES, 'UTF-8'); ?>" />
 								</div>
 								<div class="p-3">
-									<label class="form-label" for="form-checkout-phone">Số điện thoại</label>
-									<input type="text" id="form-checkout-phone" class="form-control form-control-lg" value="<?php echo $SDT; ?>" />
+									<label class="form-label" for="form-checkout-phone">Số điện thoại <span class="text-danger">*</span></label>
+									<input type="tel" id="form-checkout-phone" class="form-control form-control-lg" maxlength="20" autocomplete="tel" inputmode="tel" placeholder="Ví dụ: 0912345678" required value="<?php echo htmlspecialchars((string) $SDT, ENT_QUOTES, 'UTF-8'); ?>" />
 								</div>
 								<div class="p-3">
-									<label class="form-label" for="form-checkout-adress">Địa chỉ</label>
-									<input type="text" id="form-checkout-adress" class="form-control form-control-lg" value="<?php echo $DiaChi; ?>" />
+									<label class="form-label" for="form-checkout-adress">Địa chỉ nhận hàng <span class="text-danger">*</span></label>
+									<input type="text" id="form-checkout-adress" class="form-control form-control-lg" maxlength="255" autocomplete="street-address" placeholder="Số nhà, đường, phường/xã, quận/huyện, tỉnh/thành" required value="<?php echo htmlspecialchars((string) $DiaChi, ENT_QUOTES, 'UTF-8'); ?>" />
 								</div>
 								<div class="p-3">
 									<label class="form-label" for="form-checkout-note">Ghi Chú</label>
 									<input type="text" id="form-checkout-note" class="form-control form-control-lg"/>
 								</div>
 								<div class="p-3">
-									<input type="hidden" id="form-checkout-id" class="form-control form-control-lg" value="<?php echo $ID_KhachHang; ?>" />
+									<input type="hidden" id="form-checkout-id" class="form-control form-control-lg" value="<?php echo (int) $ID_KhachHang; ?>" />
 								</div>
 							</div>
 							<div class="col-md-7 p-3">
@@ -101,16 +122,24 @@ if (isset($_SESSION['user'])) {
 										</tbody>
 										<tfoot>
 											<?php
-											// Calculate shipping fee: 25,000 VND for orders under 500,000 VND
-											$subtotal = isset($_SESSION['sum_Total']) ? intval($_SESSION['sum_Total']) : 0;
-											$shipping_fee = 0;
-											$free_shipping_threshold = 500000; // 500,000 VND
+											$subtotal = (int) $shippingQuote['subtotal'];
+											$shipping_fee = (int) $shippingQuote['fee'];
 											
-											if ($subtotal > 0 && $subtotal < $free_shipping_threshold) {
-												$shipping_fee = 25000; // 25,000 VND shipping fee
+											$voucher_discount = 0;
+											$checkout_voucher = null;
+											if (!$isGuest && !empty($_SESSION['voucher_code']) && $subtotal > 0) {
+												try {
+													$checkout_voucher = (new VoucherService($conn))->validate(
+														(string) $_SESSION['voucher_code'],
+														(int) $ID_KhachHang,
+														$subtotal
+													);
+													$voucher_discount = (int) $checkout_voucher['discount_amount'];
+												} catch (VoucherException) {
+													unset($_SESSION['voucher_code']);
+												}
 											}
-											
-											$total_with_shipping = $subtotal + $shipping_fee;
+											$total_with_shipping = max(0, $subtotal - $voucher_discount) + $shipping_fee;
 											?>
 											<tr>
 												<th scope="col">Tổng tiền sản phẩm</th>
@@ -133,6 +162,12 @@ if (isset($_SESSION['user'])) {
 													<i class="fas fa-check-circle me-2"></i>Miễn Phí Vận Chuyển
 												</th>
 												<th scope="col" class="text-success">Miễn phí</th>
+											</tr>
+											<?php endif; ?>
+											<?php if ($checkout_voucher !== null): ?>
+											<tr class="text-success">
+												<th scope="col" colspan="4">Giảm giá (<?php echo htmlspecialchars((string) $checkout_voucher['code'], ENT_QUOTES, 'UTF-8'); ?>)</th>
+												<th scope="col">-<?php echo number_format($voucher_discount, 0, ',', '.'); ?> đ</th>
 											</tr>
 											<?php endif; ?>
 											<tr class="table-active">
@@ -162,29 +197,35 @@ if (isset($_SESSION['user'])) {
 	<!-- ajax -->
 	<script>
 		// Xử lý sự kiện nhấp vào nút "mua hang"
+		const isGuestCheckout = <?php echo $isGuest ? 'true' : 'false'; ?>;
 		function MuaHang() {
 			var ID_KhachHang = document.getElementById("form-checkout-id").value;
-			var HoVaTen = document.getElementById("form-checkout-name").value;
-			var Email = document.getElementById("form-checkout-email").value;
-			var Sdt = document.getElementById("form-checkout-phone").value;
-			var DiaChi = document.getElementById("form-checkout-adress").value;
+			var HoVaTen = document.getElementById("form-checkout-name").value.trim();
+			var Email = document.getElementById("form-checkout-email").value.trim();
+			var Sdt = document.getElementById("form-checkout-phone").value.trim();
+			var DiaChi = document.getElementById("form-checkout-adress").value.trim();
 			var GhiChu = document.getElementById("form-checkout-note").value;
-			
-			// Calculate shipping fee
-			var subtotal = <?php echo $subtotal; ?>;
-			var shippingFee = <?php echo $shipping_fee; ?>;
-			
+
+			// Same rules as CheckoutService: name, Vietnamese mobile number and address are required.
+			if (!HoVaTen) { alert('Vui lòng nhập họ và tên.'); return; }
+			if (!/^(?:0|\+84|84)(?:3|5|7|8|9)\d{8}$/.test(Sdt.replace(/[\s.\-()]/g, ''))) {
+				alert('Số điện thoại không hợp lệ. Vui lòng nhập số di động Việt Nam, ví dụ 0912345678.');
+				return;
+			}
+			if (DiaChi.length < 10) { alert('Vui lòng nhập địa chỉ nhận hàng đầy đủ.'); return; }
+			if (!isGuestCheckout && !Email) { alert('Vui lòng nhập email.'); return; }
+
 			$.ajax({
 				type: 'POST',
 				url: '../Processing/XuLy_DonHang.php',
 				data: {
-					ID_KhachHang: ID_KhachHang,
+					csrf_token: <?php echo json_encode(csrf_token()); ?>,
 					HoVaTen: HoVaTen,
 					Email: Email,
 					Sdt: Sdt,
 					DiaChi: DiaChi,
-					GhiChu: GhiChu,
-					shipping_fee: shippingFee
+					ShippingRegion: <?php echo json_encode($shippingRegion); ?>,
+					GhiChu: GhiChu
 				},
 				success: function(response) {
 					// Trim response to handle whitespace and extract last line (in case of warnings)
@@ -193,7 +234,12 @@ if (isset($_SESSION['user'])) {
 					var lines = response.split('\n');
 					var lastLine = lines[lines.length - 1].trim();
 					
-					if(lastLine == "success" || response.includes("success"))
+					if (lastLine.indexOf("success:") === 0)
+					{
+						alert('Đặt hàng thành công! Mã đơn của bạn là #' + lastLine.substring(8) + '. Nhân viên Mơ Shop sẽ gọi ' + Sdt + ' để xác nhận.');
+						window.location.href = "index.php";
+					}
+					else if(lastLine == "success" || response.includes("success"))
 					{
 						alert('Mua hàng thành công!');
 						window.location.href = "Cart.php";
@@ -231,7 +277,10 @@ if (isset($_SESSION['user'])) {
 				error: function(xhr, status, error) {
 					console.error('AJAX Error:', status, error);
 					console.error('Response:', xhr.responseText);
-					alert('Đã xảy ra lỗi kết nối. Vui lòng thử lại sau.');
+					// Validation failures come back as 4xx with "error:<lý do>" or "stock_error:<lý do>".
+					var text = (xhr.responseText || '').trim();
+					var match = text.match(/(?:stock_)?error:(.+)$/);
+					alert(match ? match[1].trim() : 'Đã xảy ra lỗi kết nối. Vui lòng thử lại sau.');
 				}
 			});
 		}

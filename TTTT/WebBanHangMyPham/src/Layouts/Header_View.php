@@ -8,12 +8,14 @@
             <div class="col-md-7" id="header-search-inf">
                 <div class="row" id="none-search-about">
                     <div class="col-md-6 d-flex align-items-center">
-                        <div class="input-group mt-3 mt-md-0 w-100">
-                            <input id="timkiemsanpham" type="text" class="form-control search-header" placeholder="Tìm"
-                                aria-describedby="basic-addon2">
-                            <span onclick="TimKiem()" class="input-group-text icon-search-header" id="basic-addon2"><i
-                                    class="fa-solid fa-magnifying-glass"></i></span>
-                        </div>
+                        <form class="input-group mt-3 mt-md-0 w-100" method="get" action="View_Product.php" role="search">
+                            <input id="timkiemsanpham" name="search_like" type="search" class="form-control search-header"
+                                value="<?php echo htmlspecialchars(trim((string) ($_GET['search_like'] ?? '')), ENT_QUOTES, 'UTF-8'); ?>"
+                                placeholder="Tìm sản phẩm" aria-label="Tìm sản phẩm" maxlength="100" required>
+                            <button class="input-group-text icon-search-header" type="submit" aria-label="Tìm kiếm">
+                                <i class="fa-solid fa-magnifying-glass"></i>
+                            </button>
+                        </form>
                     </div>
                     <div class="col-md-6">
                         <div class="row align-items-center">
@@ -45,6 +47,7 @@
                                     <?php
                                     if (isset($_SESSION['user'])) {
                                         echo '<form method="POST" action="../View/index.php" class="m-0 p-0">                                                    
+                                        ' . csrf_field() . '
                                         <input type="hidden" name="KetThucSession" value = "1">                                                    
                                         <a class="color-logo" href="#" onclick="this.closest(\'form\').submit(); return false;">Đăng xuất</a>                                               
                                         </form>';
@@ -113,18 +116,9 @@
     </div>
 </div>
 <script>
-    function TimKiem() {
-        var key_search = document.getElementById("timkiemsanpham").value;
-
-        if (key_search == "") {
-            alert("Vui Lòng Nhập Từ Khóa!");
-        } else {
-            window.location.href = "View_Product.php?search_like=" + key_search;
-        }
-    }
-
     // Notification system
     const NOTIF_USER_ID = <?php echo isset($_SESSION['IDNguoiDung']) ? (int)$_SESSION['IDNguoiDung'] : 0; ?>;
+    const NOTIF_CSRF_TOKEN = <?php echo json_encode(csrf_token()); ?>;
     let notifDropdownOpen = false;
 
     function toggleNotifications() {
@@ -136,7 +130,7 @@
 
     function loadNotifications() {
         if (!NOTIF_USER_ID) return;
-        fetch('../Processing/Customer_Notifications.php?user_id=' + NOTIF_USER_ID)
+        fetch('../Processing/Customer_Notifications.php')
             .then(r => r.json())
             .then(data => {
                 if (data.ok) {
@@ -166,24 +160,30 @@
         }
         list.innerHTML = notifications.map(n => `
             <div class="p-2 border-bottom ${n.is_read ? '' : 'bg-light'}" onclick="markRead(${n.id})" style="cursor:pointer;">
-                <div class="fw-bold small">${n.title}</div>
-                <div class="small text-muted">${n.message}</div>
+                <div class="fw-bold small">${escapeNotifHtml(n.title)}</div>
+                <div class="small text-muted">${escapeNotifHtml(n.message)}</div>
                 <div class="text-end small text-muted">${new Date(n.created_at).toLocaleDateString('vi-VN')}</div>
             </div>
         `).join('');
     }
 
+    function escapeNotifHtml(value) {
+        return String(value ?? '').replace(/[&<>'"]/g, char => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#039;', '"': '&quot;'
+        })[char]);
+    }
+
     function updateCustomerStatus(status) {
         // Could display customer status badge somewhere if needed
         if (status.customer_label === 'potential') {
-            console.log('Customer is POTENTIAL with ' + status.discount_percent + '% discount');
+            console.log('Customer currently has strong purchase intent');
         }
     }
 
     function markRead(notifId) {
         fetch('../Processing/Customer_Notifications.php', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': NOTIF_CSRF_TOKEN},
             body: JSON.stringify({notification_id: notifId})
         }).then(() => loadNotifications());
     }
@@ -191,8 +191,8 @@
     function markAllRead() {
         fetch('../Processing/Customer_Notifications.php', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({user_id: NOTIF_USER_ID, mark_all_read: true})
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': NOTIF_CSRF_TOKEN},
+            body: JSON.stringify({mark_all_read: true})
         }).then(() => loadNotifications());
     }
 

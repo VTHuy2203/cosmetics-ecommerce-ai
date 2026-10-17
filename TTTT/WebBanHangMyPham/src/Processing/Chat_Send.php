@@ -4,15 +4,21 @@
  * Handles chat messages, product recommendations, and appointment scheduling
  */
 
-session_start();
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__) . '/Services/ChatSessionService.php';
+require_once dirname(__DIR__) . '/Services/CustomerScoringService.php';
 
-// Create PDO connection
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    json_response(['ok' => false, 'error' => 'method_not_allowed'], 405);
+}
+require_csrf(true);
+if (!auth_rate_limit('chat:' . ($_SESSION['IDNguoiDung'] ?? session_id()), 30, 60)) {
+    json_response(['ok' => false, 'error' => 'rate_limited'], 429);
+}
+
 try {
-    $pdo = new PDO("mysql:host=localhost;dbname=webmipham1;charset=utf8mb4", "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
+    $pdo = chat_session_pdo();
 } catch (PDOException $e) {
     error_log("Chat_Send.php: PDO connection error: " . $e->getMessage());
     die(json_encode(['ok' => false, 'error' => 'Database connection failed']));
@@ -22,28 +28,21 @@ try {
 header('Content-Type: application/json; charset=utf-8');
 
 // Get request data
-$input = json_decode(file_get_contents('php://input'), true);
-$message = trim($input['message'] ?? '');
-$session_id = $input['session_id'] ?? session_id();
-// Get user_id from session - check multiple session variable names
-$user_id = 0;
-if (isset($_SESSION['IDNguoiDung']) && $_SESSION['IDNguoiDung']) {
-    $user_id = intval($_SESSION['IDNguoiDung']);
-} elseif (isset($_SESSION['user_id']) && $_SESSION['user_id']) {
-    $user_id = intval($_SESSION['user_id']);
-} elseif (isset($_SESSION['user']) && $_SESSION['user']) {
-    // Try to get user_id from database using username
-    try {
-        $stmt = $pdo->prepare("SELECT ID_KhachHang FROM khachhang WHERE TenDangNhap = ? LIMIT 1");
-        $stmt->execute([$_SESSION['user']]);
-        $user_row = $stmt->fetch(PDO::FETCH_ASSOC);
-        if ($user_row) {
-            $user_id = intval($user_row['ID_KhachHang']);
-        }
-    } catch (Exception $e) {
-        error_log("Chat_Send.php: Error getting user_id from username: " . $e->getMessage());
-    }
+$rawInput = file_get_contents('php://input');
+if (!is_string($rawInput) || strlen($rawInput) > 16384) {
+    json_response(['ok' => false, 'error' => 'payload_too_large'], 413);
 }
+$input = json_decode($rawInput, true);
+if (!is_array($input)) {
+    json_response(['ok' => false, 'error' => 'invalid_json'], 400);
+}
+$message = is_string($input['message'] ?? null) ? trim($input['message']) : '';
+$requested_session_id = $input['session_id'] ?? null;
+if ($message === '' || mb_strlen($message) > 1000) {
+    json_response(['ok' => false, 'error' => 'invalid_message'], 422);
+}
+$user_id = chat_session_user_id($pdo);
+$session_id = chat_session_resolve($pdo, $user_id, $requested_session_id);
 
 // Get user info if logged in
 $user_name = "Bạn";
@@ -60,139 +59,52 @@ if ($user_id > 0) {
     }
 }
 
-// Ensure database schema
-function ensureSchema($pdo) {
-    try {
-        // Ensure chat_messages table
-        $pdo->exec("CREATE TABLE IF NOT EXISTS chat_messages (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NULL,
-      session_id VARCHAR(128) NOT NULL,
-            message TEXT NOT NULL,
-            direction ENUM('user','bot') NOT NULL DEFAULT 'user',
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_user_id (user_id),
-            INDEX idx_session_id (session_id),
-            INDEX idx_created_at (created_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        
-        // Ensure chat_appointments table
-        $pdo->exec("CREATE TABLE IF NOT EXISTS chat_appointments (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NULL,
-      session_id VARCHAR(128) NOT NULL,
-            appt_at DATETIME NOT NULL,
-            note TEXT NULL,
-            message_content TEXT NULL,
-            message_sent_at TIMESTAMP NULL,
-            guest_name VARCHAR(255) NULL,
-            guest_phone VARCHAR(20) NULL,
-            guest_address TEXT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_user_id (user_id),
-            INDEX idx_session_id (session_id),
-            INDEX idx_appt_at (appt_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        
-        // Ensure guest_customers table for non-logged-in customers
-        $pdo->exec("CREATE TABLE IF NOT EXISTS guest_customers (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      session_id VARCHAR(128) NOT NULL,
-      name VARCHAR(255) NOT NULL,
-      phone VARCHAR(20) NOT NULL,
-      address TEXT NULL,
-      email VARCHAR(255) NULL,
-      notes TEXT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      INDEX idx_session_id (session_id),
-      INDEX idx_phone (phone)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        
-        // Ensure customer_analysis table
-        $pdo->exec("CREATE TABLE IF NOT EXISTS customer_analysis (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NULL,
-      session_id VARCHAR(128) NOT NULL,
-            label ENUM('spam','follow-up','potential') NOT NULL DEFAULT 'spam',
-            product_interest TEXT NULL,
-            last_need TEXT NULL,
-            message_count INT NOT NULL DEFAULT 0,
-            has_appointment TINYINT(1) NOT NULL DEFAULT 0,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_user_id (user_id),
-            INDEX idx_session_id (session_id),
-            INDEX idx_label (label)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        
-        // Try to add unique key if it doesn't exist
-        try {
-            $pdo->exec("ALTER TABLE customer_analysis ADD UNIQUE KEY unique_user_session (user_id, session_id)");
-        } catch (Exception $e) {
-            // Key might already exist, ignore error
-        }
-        
-        // Modify session_id column if needed
-        try {
-            $pdo->exec("ALTER TABLE chat_messages MODIFY COLUMN session_id VARCHAR(128) NOT NULL");
-        } catch (Exception $e) {
-            // Column might already be correct size
-        }
-        
-        try {
-            $pdo->exec("ALTER TABLE chat_appointments MODIFY COLUMN session_id VARCHAR(128) NOT NULL");
-        } catch (Exception $e) {
-            // Column might already be correct size
-        }
-
-        // Add missing columns for guest info if they don't exist
-        try {
-            $pdo->exec("ALTER TABLE chat_appointments ADD COLUMN message_content TEXT NULL AFTER note");
-        } catch (Exception $e) {
-            // Column might already exist
-        }
-
-        try {
-            $pdo->exec("ALTER TABLE chat_appointments ADD COLUMN message_sent_at TIMESTAMP NULL AFTER message_content");
-        } catch (Exception $e) {
-            // Column might already exist
-        }
-
-        try {
-            $pdo->exec("ALTER TABLE chat_appointments ADD COLUMN guest_name VARCHAR(255) NULL AFTER message_sent_at");
-        } catch (Exception $e) {
-            // Column might already exist
-        }
-
-        try {
-            $pdo->exec("ALTER TABLE chat_appointments ADD COLUMN guest_phone VARCHAR(20) NULL AFTER guest_name");
-        } catch (Exception $e) {
-            // Column might already exist
-        }
-
-        try {
-            $pdo->exec("ALTER TABLE chat_appointments ADD COLUMN guest_address TEXT NULL AFTER guest_phone");
-        } catch (Exception $e) {
-            // Column might already exist
-        }
-
-    } catch (Exception $e) {
-        error_log("Chat_Send.php: Schema error: " . $e->getMessage());
-    }
-}
-
-ensureSchema($pdo);
-
 // Helper functions
 function detectLanguage($text) {
-    $vietnamese = ['xin chào', 'chào', 'tôi', 'muốn', 'mua', 'sản phẩm', 'giá', 'đặt lịch', 'tư vấn'];
-    $text_lower = mb_strtolower($text, 'UTF-8');
-    foreach ($vietnamese as $word) {
-        if (mb_strpos($text_lower, $word, 0, 'UTF-8') !== false) {
-            return 'vi';
-        }
+    $text_lower = mb_strtolower((string) $text, 'UTF-8');
+    // Any Vietnamese diacritic (booking form "Tên:/SĐT:/Địa chỉ:" included) means Vietnamese.
+    if (preg_match('/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/u', $text_lower) === 1) {
+        return 'vi';
     }
-    return 'en';
+    // The shop serves Vietnamese customers: answer in English only for clearly English text.
+    $english = ['hello', 'hi', 'please', 'want', 'need', 'what', 'which', 'how', 'price', 'product', 'skin',
+        'recommend', 'buy', 'cream', 'lipstick', 'thanks', 'thank', 'the', 'for', 'my', 'is', 'are', 'can', 'you'];
+    $words = preg_split('/[^a-z]+/', $text_lower, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    return count(array_intersect($words, $english)) >= 2 ? 'en' : 'vi';
+}
+
+/** @return array{name:string,phone:string,address:string}|string Clean guest contact, or an error message. */
+function validateGuestContact(string $name, string $phone, string $address)
+{
+    $name = trim(preg_replace('/\s+/u', ' ', $name) ?? '');
+    $phone = preg_replace('/[\s.\-()]/', '', $phone) ?? '';
+    $address = trim(preg_replace('/\s+/u', ' ', $address) ?? '');
+    if (mb_strlen($name) < 2 || mb_strlen($name) > 100) {
+        return 'Bạn vui lòng nhập họ tên (2–100 ký tự) để Mơ Shop liên hệ nhé.';
+    }
+    if (preg_match('/^(?:0|\+84)(?:3|5|7|8|9)\d{8}$/', $phone) !== 1) {
+        return 'Số điện thoại chưa đúng định dạng (ví dụ 0912345678). Bạn kiểm tra lại giúp mình nhé.';
+    }
+    if (mb_strlen($address) > 255) {
+        $address = mb_substr($address, 0, 255);
+    }
+    return ['name' => $name, 'phone' => $phone, 'address' => $address];
+}
+
+/** Realtime toast for admin/staff; fail-open so chat never breaks when the socket server is down. */
+function chatRealtimePush(array $message): void
+{
+    try {
+        $wsPushFile = dirname(__DIR__, 3) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
+        if (is_file($wsPushFile)) {
+            require_once $wsPushFile;
+            if (function_exists('websocket_push')) {
+                websocket_push(['admin_channel', 'staff_channel'], $message);
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('Chat_Send.php: realtime push failed: ' . $e->getMessage());
+    }
 }
 
 function hasBookingIntent($text) {
@@ -231,43 +143,12 @@ function isBookingNo($text) {
     return false;
 }
 
-function isProductSearch($text) {
-    // More comprehensive product search detection (Renamed concept: shouldCallRAG)
-    $product_keywords = [
-        'mua', 'tìm', 'tim', 'bán', 'ban', 'giá', 'gia', 'sản phẩm', 'san pham', 'product',
-        'son', 'kem', 'serum', 'mặt nạ', 'mat na', 'makeup', 'mỹ phẩm', 'my pham', 'cosmetic',
-        'sữa rửa mặt', 'sua rua mat', 'nước tẩy trang', 'nuoc tay trang', 'tẩy trang', 'tay trang',
-        'chống nắng', 'chong nang', 'dưỡng', 'duong', 'dưỡng ẩm', 'duong am', 'moisturizer',
-        'toner', 'essence', 'cleanser', 'mask', 'cream', 'lotion', 'gel', 'spray',
-        'trắng da', 'trang da', 'whitening', 'trị mụn', 'tri mun', 'acne', 'chống lão hóa', 'chong lao hoa',
-        // RAG keywords (Shop info, Policy, Comparison, FAQs)
-        'so sánh', 'so sanh', 'compare', 'khác nhau', 'giong nhau',
-        'chính sách', 'chinh sach', 'policy', 'đổi trả', 'doi tra', 'return',
-        'địa chỉ', 'dia chi', 'address', 'cửa hàng', 'cua hang', 'shop',
-        'liên hệ', 'lien he', 'contact', 'nhân viên', 'nhan vien', 'staff',
-        'bảo hành', 'bao hanh', 'freeship', 'ship', 'giao hàng',
-        'tư vấn', 'tu van', 'da dầu', 'da khô', 'da nhạy cảm', 'da hỗn hợp', 'loại da'
-    ];
-    $text_lower = mb_strtolower($text, 'UTF-8');
-    foreach ($product_keywords as $keyword) {
-        if (mb_strpos($text_lower, $keyword, 0, 'UTF-8') !== false) {
-            return true;
-        }
-    }
-    return false;
-}
-
 function parseDateTime($text) {
-    // Log the incoming text for debugging
-    error_log("parseDateTime input: " . $text);
-
     // Extract only the datetime part (before any pipe | character for guest info)
     $datetime_part = $text;
     if (strpos($text, '|') !== false) {
         $datetime_part = trim(explode('|', $text)[0]);
     }
-    error_log("parseDateTime datetime_part: " . $datetime_part);
-
     // Try to parse Vietnamese datetime format: DD/MM/YYYY HH:MM
     if (preg_match('/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\s+(\d{1,2})[:h](\d{2})/i', $datetime_part, $matches)) {
         $day = intval($matches[1]);
@@ -277,40 +158,75 @@ function parseDateTime($text) {
         $hour = intval($matches[4]);
         $minute = intval($matches[5]);
 
-        error_log("parseDateTime parsed: day=$day, month=$month, year=$year, hour=$hour, minute=$minute");
-
         if (checkdate($month, $day, $year) && $hour >= 0 && $hour < 24 && $minute >= 0 && $minute < 60) {
             $result = sprintf('%04d-%02d-%02d %02d:%02d:00', $year, $month, $day, $hour, $minute);
-            error_log("parseDateTime result: " . $result);
             return $result;
-        } else {
-            error_log("parseDateTime: checkdate failed or invalid time");
         }
-    } else {
-        error_log("parseDateTime: regex did not match");
     }
 
     return null;
 }
 
-function callRAGAPI($message, $user_id, $session_id) {
-    $api_url = "http://127.0.0.1:8010/chat";
-    
-    $ch = curl_init($api_url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+function callRAGAPI($message, $user_id, $session_id, array $history = [], array $context_product_ids = []) {
+    $serviceUrl = rtrim(app_env('AI_SERVICE_URL', '') ?? '', '/');
+    if ($serviceUrl === '') {
+        return null;
+    }
+    $api_url = $serviceUrl . '/chat';
+    $serviceToken = app_env('AI_SERVICE_TOKEN', '') ?? '';
+
+    $payload = json_encode([
         'message' => $message,
         'user_id' => $user_id ?: null,
-        'session_id' => $session_id
-    ]));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
-    
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
+        'session_id' => $session_id,
+        'history' => $history,
+        'context_product_ids' => array_slice(array_values($context_product_ids), 0, 5),
+    ], JSON_UNESCAPED_UNICODE);
+    $headers = ['Content-Type: application/json'];
+    if ($serviceToken !== '') {
+        $headers[] = 'Authorization: Bearer ' . $serviceToken;
+    }
+
+    $response = false;
+    $http_code = 0;
+    $transport_error = '';
+
+    // Laragon installations do not always load ext-curl for Apache even when
+    // PHP CLI has it. Keep a native HTTP fallback so chat never dies with a
+    // fatal "undefined function curl_init" error.
+    if (function_exists('curl_init')) {
+        $ch = curl_init($api_url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 75);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+
+        $response = curl_exec($ch);
+        $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $transport_error = $response === false ? curl_error($ch) : '';
+        curl_close($ch);
+    } else {
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => implode("\r\n", $headers),
+                'content' => $payload,
+                'timeout' => 75,
+                'ignore_errors' => true,
+            ],
+        ]);
+        $response = @file_get_contents($api_url, false, $context);
+        $response_headers = $http_response_header ?? [];
+        if (isset($response_headers[0]) && preg_match('/\s(\d{3})\s/', $response_headers[0], $matches)) {
+            $http_code = (int) $matches[1];
+        }
+        if ($response === false) {
+            $last_error = error_get_last();
+            $transport_error = (string) ($last_error['message'] ?? 'HTTP request failed');
+        }
+    }
     
     if ($http_code === 200 && $response) {
         $data = json_decode($response, true);
@@ -318,6 +234,13 @@ function callRAGAPI($message, $user_id, $session_id) {
             return $data;
         }
     }
+
+    error_log(sprintf(
+        'Chat_Send.php: AI request failed (HTTP %d): %s %s',
+        $http_code,
+        $transport_error,
+        $response === false ? 'transport_failure' : 'non_success_response'
+    ));
     
     return null;
 }
@@ -333,23 +256,37 @@ try {
         $stmt->execute([null, $session_id, $message]);
     }
     
-    // Send WebSocket notification to Admin for new chat message (only if user is logged in)
-    if ($user_id > 0) {
-        try {
-            $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-            if (file_exists($wsPushFile)) {
-                require_once($wsPushFile);
-                if (function_exists('websocket_push_chat_message')) {
-                    websocket_push_chat_message($user_id, $user_name, $message);
-                }
-            }
-        } catch (Exception $e) {
-            error_log("Chat_Send.php: Error sending WebSocket notification: " . $e->getMessage());
-        }
-    }
 } catch (Exception $e) {
     error_log("Chat_Send.php: Error saving user message: " . $e->getMessage());
 }
+
+// Realtime: tell admin/staff about every new customer message, guests included.
+$chat_sender_name = $user_name;
+if ($user_id <= 0) {
+    $chat_sender_name = 'Khách vãng lai #' . substr($session_id, 0, 8);
+    try {
+        $guestName = $pdo->prepare("SELECT name FROM guest_customers WHERE session_id = ? AND phone <> '' LIMIT 1");
+        $guestName->execute([$session_id]);
+        $chat_sender_name = (string) ($guestName->fetchColumn() ?: $chat_sender_name);
+    } catch (Exception $e) {
+        error_log("Chat_Send.php: Error reading guest name: " . $e->getMessage());
+    }
+}
+chatRealtimePush([
+    'type' => 'chat_message',
+    'title' => $user_id > 0 ? 'Tin nhắn mới' : 'Khách vãng lai nhắn tin',
+    'message' => $chat_sender_name . ': ' . mb_strimwidth($message, 0, 80, '...', 'UTF-8'),
+    'sound' => 'notification',
+    'data' => [
+        'user_id' => $user_id > 0 ? $user_id : null,
+        'user_name' => $chat_sender_name,
+        'session_id' => $session_id,
+        'is_guest' => $user_id <= 0,
+        'message_preview' => mb_strimwidth($message, 0, 200, '...', 'UTF-8'),
+        'timestamp' => date('Y-m-d H:i:s'),
+    ],
+]);
+chat_session_touch($pdo, $session_id, $message);
 
 // Process message
 $lang = detectLanguage($message);
@@ -360,26 +297,39 @@ $has_booking_form = false;
 $parsed_dt = parseDateTime($message);
 
 // Check if user is responding to consultation question (only if not submitting datetime)
-$is_booking_yes = !$parsed_dt ? isBookingYes($message) : false;
-$is_booking_no = !$parsed_dt ? isBookingNo($message) : false;
+$is_booking_yes = false;
+$is_booking_no = false;
 
 // Check for booking intent (only if not submitting datetime)
 $booking_intent = !$parsed_dt ? hasBookingIntent($message) : false;
 
 // Check if products have already been suggested (to avoid suggesting multiple times)
 $products_already_suggested = false;
+$booking_confirmation_pending = false;
 try {
     if ($user_id > 0) {
-        $check_stmt = $pdo->prepare("SELECT id FROM chat_messages WHERE user_id = ? AND direction = 'bot' AND (message LIKE '%Bạn có muốn đặt lịch tư vấn%' OR message LIKE '%Would you like to schedule%') ORDER BY created_at DESC LIMIT 1");
-        $check_stmt->execute([$user_id]);
+        $check_stmt = $pdo->prepare("SELECT id FROM chat_messages WHERE user_id = ? AND session_id = ? AND direction = 'bot' AND (message LIKE '%Bạn có muốn đặt lịch tư vấn%' OR message LIKE '%Would you like to schedule%') ORDER BY created_at DESC LIMIT 1");
+        $check_stmt->execute([$user_id, $session_id]);
     } else {
         $check_stmt = $pdo->prepare("SELECT id FROM chat_messages WHERE session_id = ? AND direction = 'bot' AND (message LIKE '%Bạn có muốn đặt lịch tư vấn%' OR message LIKE '%Would you like to schedule%') ORDER BY created_at DESC LIMIT 1");
         $check_stmt->execute([$session_id]);
     }
     $products_already_suggested = $check_stmt->fetch() !== false;
+
+    $latestBot = $pdo->prepare(
+        $user_id > 0
+            ? "SELECT message FROM chat_messages WHERE user_id=? AND session_id=? AND direction='bot' ORDER BY id DESC LIMIT 1"
+            : "SELECT message FROM chat_messages WHERE user_id IS NULL AND session_id=? AND direction='bot' ORDER BY id DESC LIMIT 1"
+    );
+    $latestBot->execute($user_id > 0 ? [$user_id, $session_id] : [$session_id]);
+    $latestBotMessage = (string) ($latestBot->fetchColumn() ?: '');
+    $booking_confirmation_pending = str_contains($latestBotMessage, 'Bạn có muốn đặt lịch tư vấn')
+        || str_contains($latestBotMessage, 'Would you like to schedule');
 } catch (Exception $e) {
     error_log("Chat_Send.php: Error checking if products already suggested: " . $e->getMessage());
 }
+$is_booking_yes = !$parsed_dt && $booking_confirmation_pending && isBookingYes($message);
+$is_booking_no = !$parsed_dt && $booking_confirmation_pending && isBookingNo($message);
 
 // THỨ TỰ ƯU TIÊN:
 // 1. Thời gian gửi thông tin (biểu mẫu đặt lịch đã được gửi) - ƯU TIÊN CAO NHẤT
@@ -395,46 +345,75 @@ if ($parsed_dt) {
     $guest_name = null;
     $guest_phone = null;
     $guest_address = null;
-    
-    if ($user_id == 0 && preg_match('/\|\s*Tên:\s*([^|]+)\s*\|\s*SĐT:\s*([^|]+)\s*\|\s*Địa chỉ:\s*(.+)/i', $message, $matches)) {
-        $guest_name = trim($matches[1]);
-        $guest_phone = trim($matches[2]);
-        $guest_address = trim($matches[3]);
-        
-        // Save guest customer info
-        try {
-            $guest_stmt = $pdo->prepare("INSERT INTO guest_customers (session_id, name, phone, address) 
-                                        VALUES (?, ?, ?, ?)
-                                        ON DUPLICATE KEY UPDATE
-                                        name = VALUES(name),
-                                        phone = VALUES(phone),
-                                        address = VALUES(address),
-                                        updated_at = NOW()");
-            $guest_stmt->execute([$session_id, $guest_name, $guest_phone, $guest_address]);
-        } catch (Exception $e) {
-            // Try without ON DUPLICATE KEY if unique key doesn't exist
+    $booking_error = null;
+
+    if ($user_id == 0 && preg_match('/\|\s*Tên:\s*([^|]+)\s*\|\s*SĐT:\s*([^|]+)\s*\|\s*Địa chỉ:\s*(.*)/iu', $message, $matches)) {
+        $contact = validateGuestContact($matches[1], $matches[2], $matches[3]);
+        if (is_string($contact)) {
+            $booking_error = $contact;
+        } else {
+            $guest_name = $contact['name'];
+            $guest_phone = $contact['phone'];
+            $guest_address = $contact['address'];
+            // One profile per chat session (uq_guest_session): the placeholder row is filled in.
             try {
-                $check_guest = $pdo->prepare("SELECT id FROM guest_customers WHERE session_id = ? LIMIT 1");
-                $check_guest->execute([$session_id]);
-                $exists_guest = $check_guest->fetch();
-                
-                if ($exists_guest) {
-                    $guest_stmt = $pdo->prepare("UPDATE guest_customers SET name = ?, phone = ?, address = ?, updated_at = NOW() WHERE id = ?");
-                    $guest_stmt->execute([$guest_name, $guest_phone, $guest_address, $exists_guest['id']]);
-                } else {
-                    $guest_stmt = $pdo->prepare("INSERT INTO guest_customers (session_id, name, phone, address) VALUES (?, ?, ?, ?)");
-                    $guest_stmt->execute([$session_id, $guest_name, $guest_phone, $guest_address]);
-                }
-            } catch (Exception $e2) {
-                error_log("Chat_Send.php: Error saving guest customer: " . $e2->getMessage());
+                $guest_stmt = $pdo->prepare("INSERT INTO guest_customers (session_id, name, phone, address)
+                                            VALUES (?, ?, ?, ?)
+                                            ON DUPLICATE KEY UPDATE
+                                            name = VALUES(name),
+                                            phone = VALUES(phone),
+                                            address = VALUES(address),
+                                            updated_at = NOW()");
+                $guest_stmt->execute([$session_id, $guest_name, $guest_phone, $guest_address]);
+            } catch (Exception $e) {
+                error_log("Chat_Send.php: Error saving guest customer: " . $e->getMessage());
             }
         }
     }
-    
-    try {
+    if ($booking_error === null && strtotime($parsed_dt) <= time()) {
+        $booking_error = 'Thời gian hẹn đã qua. Bạn chọn giúp mình một thời điểm trong tương lai nhé.';
+    }
+
+    if ($booking_error !== null) {
+        $reply = $booking_error . "\n\n[[BOOKING_FORM]]";
+        $has_booking_form = true;
+    } else try {
         $stmt = $pdo->prepare("INSERT INTO chat_appointments (user_id, session_id, appt_at, message_content, message_sent_at, guest_name, guest_phone, guest_address) VALUES (?, ?, ?, ?, NOW(), ?, ?, ?)");
         $stmt->execute([$user_id ?: null, $session_id, $parsed_dt, $message, $guest_name, $guest_phone, $guest_address]);
-        
+        $appointment_id = (int) $pdo->lastInsertId();
+        $appointment_who = $user_id > 0 ? $user_name : ($guest_name ?: 'Khách vãng lai #' . substr($session_id, 0, 8));
+        $appointment_when = date('d/m/Y H:i', strtotime($parsed_dt));
+
+        // Persistent admin notification (Notification Center) via the outbox, plus an instant toast.
+        try {
+            $outbox = $pdo->prepare("INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload) VALUES ('appointment.created', 'appointment', ?, ?)");
+            $outbox->execute([(string) $appointment_id, json_encode([
+                'appointment_id' => $appointment_id,
+                'user_id' => $user_id > 0 ? $user_id : null,
+                'session_id' => $session_id,
+                'name' => $appointment_who,
+                'phone' => $guest_phone,
+                'appt_at' => $parsed_dt,
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)]);
+        } catch (Exception $e) {
+            error_log("Chat_Send.php: Error queueing appointment notification: " . $e->getMessage());
+        }
+        chatRealtimePush([
+            'type' => 'new_appointment',
+            'title' => 'Lịch hẹn tư vấn mới',
+            'message' => $appointment_who . ($guest_phone ? " ({$guest_phone})" : '') . ' hẹn lúc ' . $appointment_when,
+            'sound' => 'notification',
+            'data' => [
+                'appointment_id' => $appointment_id,
+                'user_id' => $user_id > 0 ? $user_id : null,
+                'session_id' => $session_id,
+                'is_guest' => $user_id <= 0,
+                'name' => $appointment_who,
+                'phone' => $guest_phone,
+                'appt_at' => $parsed_dt,
+            ],
+        ]);
+
         // Send thank you message after booking
         if ($lang === 'vi') {
             $reply = "Cảm ơn bạn rất nhiều! Mình đã ghi nhận lịch hẹn tư vấn của bạn vào " . date('d/m/Y H:i', strtotime($parsed_dt)) . ". " .
@@ -447,11 +426,10 @@ if ($parsed_dt) {
         // Update customer analysis
         try {
             // First try with unique key
-            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, label, has_appointment, message_count) 
-                                   VALUES (?, ?, 'potential', 1, 1)
+            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, has_appointment, message_count)
+                                   VALUES (?, ?, 1, 1)
                                    ON DUPLICATE KEY UPDATE
-                                   label = 'potential', 
-                                   has_appointment = 1, 
+                                   has_appointment = 1,
                                    message_count = message_count + 1,
                                    updated_at = NOW()");
             $stmt->execute([$user_id ?: null, $session_id]);
@@ -463,10 +441,10 @@ if ($parsed_dt) {
                 $exists = $check->fetch();
                 
                 if ($exists) {
-                    $stmt = $pdo->prepare("UPDATE customer_analysis SET label = 'potential', has_appointment = 1, message_count = message_count + 1, updated_at = NOW() WHERE id = ?");
+                    $stmt = $pdo->prepare("UPDATE customer_analysis SET has_appointment = 1, message_count = message_count + 1, updated_at = NOW() WHERE id = ?");
                     $stmt->execute([$exists['id']]);
                 } else {
-                    $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, label, has_appointment, message_count) VALUES (?, ?, 'potential', 1, 1)");
+                    $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, has_appointment, message_count) VALUES (?, ?, 1, 1)");
                     $stmt->execute([$user_id ?: null, $session_id]);
                 }
             } catch (Exception $e2) {
@@ -476,24 +454,49 @@ if ($parsed_dt) {
         
     } catch (Exception $e) {
         error_log("Chat_Send.php: Error saving appointment: " . $e->getMessage());
-        error_log("Chat_Send.php: user_id=$user_id, session_id=$session_id, parsed_dt=$parsed_dt");
-        error_log("Chat_Send.php: guest_name=$guest_name, guest_phone=$guest_phone, guest_address=$guest_address");
-        $reply = "Xin lỗi, có lỗi xảy ra khi lưu lịch hẹn: " . $e->getMessage() . ". Vui lòng thử lại sau.";
+        $reply = "Xin lỗi, hệ thống chưa thể lưu lịch hẹn. Vui lòng thử lại sau.";
     }
     
-} elseif (isProductSearch($message) && !$parsed_dt) {
-    // Product search - ALWAYS call RAG API to recommend products FIRST
-    // This MUST come before booking intent check to prioritize product recommendations
-    $rag_response = callRAGAPI($message, $user_id, $session_id);
-    
+} elseif (!$parsed_dt && !$is_booking_yes && !$is_booking_no && !$booking_intent) {
+    // AI service is the single intent router for product, policy and general chat.
+    $history = chat_session_recent_history($pdo, $session_id, $user_id, $message);
+    // Products suggested last in this session, so "so sánh 2 sản phẩm này" / "có" compares them.
+    $context_product_ids = [];
+    try {
+        $contextStmt = $pdo->prepare('SELECT context_product_ids FROM chat_sessions WHERE session_id = ? LIMIT 1');
+        $contextStmt->execute([$session_id]);
+        $context_product_ids = array_values(array_filter(array_map('intval', explode(',', (string) $contextStmt->fetchColumn()))));
+    } catch (Exception $e) {
+        error_log("Chat_Send.php: Error reading product context: " . $e->getMessage());
+    }
+    $rag_response = callRAGAPI($message, $user_id, $session_id, $history, $context_product_ids);
+
     if ($rag_response && isset($rag_response['reply'])) {
         $reply = $rag_response['reply'];
-        
-        // Check if reply contains products (has prices or product names)
-        $has_products = preg_match('/\d+[,.]?\d*\s*VND|\d+[,.]?\d*\s*đồng|Thương hiệu|Giá|sản phẩm|product|VND|đồng/iu', $reply) || 
-                       (isset($rag_response['hits']) && count($rag_response['hits']) > 0);
-        
-        if ($has_products && !$products_already_suggested) {
+        $lang = in_array(($rag_response['language'] ?? ''), ['vi', 'en'], true) ? $rag_response['language'] : $lang;
+        $is_product_intent = ($rag_response['intent'] ?? '') === 'product';
+        $has_products = $is_product_intent && !empty($rag_response['hits']);
+        $follow_up = (string) ($rag_response['follow_up'] ?? '');
+
+        if ($has_products) {
+            $suggestedIds = [];
+            foreach ($rag_response['hits'] as $hit) {
+                $hitId = (int) ($hit['meta']['IDSanPham'] ?? $hit['id'] ?? 0);
+                if ($hitId > 0 && !in_array($hitId, $suggestedIds, true)) {
+                    $suggestedIds[] = $hitId;
+                }
+            }
+            try {
+                $pdo->prepare('UPDATE chat_sessions SET context_product_ids = ? WHERE session_id = ?')
+                    ->execute([implode(',', array_slice($suggestedIds, 0, 5)) ?: null, $session_id]);
+            } catch (Exception $e) {
+                error_log("Chat_Send.php: Error saving product context: " . $e->getMessage());
+            }
+        }
+
+        // One question per turn: when the assistant just offered a comparison, the consultation
+        // offer waits for the next product answer (e.g. right after the comparison table).
+        if ($has_products && !$products_already_suggested && $follow_up !== 'compare_offer') {
             // Ask about consultation AFTER recommending products (ONLY ONCE)
             if ($lang === 'vi') {
                 $reply .= "\n\nBạn có muốn đặt lịch tư vấn với nhân viên Mơ Shop không?";
@@ -502,25 +505,35 @@ if ($parsed_dt) {
             }
         }
         
-        // Cập nhật phân tích khách hàng
-        try {
+        // Only product intent changes product-interest scoring. Store the product names the
+        // assistant actually suggested; the customer's own words go to last_need.
+        if ($is_product_intent) try {
+            $interestNames = [];
+            foreach (array_slice($rag_response['hits'] ?? [], 0, 3) as $hit) {
+                $hitName = trim((string) ($hit['meta']['TenSanPham'] ?? ''));
+                if ($hitName !== '' && !in_array($hitName, $interestNames, true)) {
+                    $interestNames[] = $hitName;
+                }
+            }
+            $product_interest = $interestNames !== [] ? mb_substr(implode('; ', $interestNames), 0, 1000) : null;
+
             $check = $pdo->prepare("SELECT id FROM customer_analysis WHERE (user_id = ? OR (user_id IS NULL AND ? IS NULL)) AND session_id = ? LIMIT 1");
             $check->execute([$user_id ?: null, $user_id ?: null, $session_id]);
             $exists = $check->fetch();
-            
+
             if ($exists) {
-                $stmt = $pdo->prepare("UPDATE customer_analysis SET 
-                                       label = IF(label = 'potential' OR has_appointment = 1, 'potential', 'follow-up'),
-                                       product_interest = ?,
+                // Keep the previous interest when this answer found no in-stock product.
+                $stmt = $pdo->prepare("UPDATE customer_analysis SET
+                                       product_interest = COALESCE(?, product_interest),
                                        last_need = ?,
                                        message_count = message_count + 1,
                                        updated_at = NOW()
                                        WHERE id = ?");
-                $stmt->execute([$message, $message, $exists['id']]);
+                $stmt->execute([$product_interest, $message, $exists['id']]);
             } else {
-                $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, label, product_interest, last_need, message_count) 
-                                       VALUES (?, ?, 'follow-up', ?, ?, 1)");
-                $stmt->execute([$user_id ?: null, $session_id, $message, $message]);
+                $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, product_interest, last_need, message_count)
+                                       VALUES (?, ?, ?, ?, 1)");
+                $stmt->execute([$user_id ?: null, $session_id, $product_interest, $message]);
             }
         } catch (Exception $e) {
             error_log("Chat_Send.php: Error updating customer analysis: " . $e->getMessage());
@@ -550,8 +563,8 @@ if ($parsed_dt) {
                                    WHERE id = ?");
             $stmt->execute([$message, $exists['id']]);
         } else {
-            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, label, last_need, message_count) 
-                                   VALUES (?, ?, 'follow-up', ?, 1)");
+            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, last_need, message_count)
+                                   VALUES (?, ?, ?, 1)");
             $stmt->execute([$user_id ?: null, $session_id, $message]);
         }
     } catch (Exception $e) {
@@ -573,16 +586,15 @@ if ($parsed_dt) {
         $exists = $check->fetch();
         
         if ($exists) {
-            $stmt = $pdo->prepare("UPDATE customer_analysis SET 
-                                   label = IF(label = 'potential' OR has_appointment = 1, 'potential', 'follow-up'),
+            $stmt = $pdo->prepare("UPDATE customer_analysis SET
                                    last_need = ?,
                                    message_count = message_count + 1,
                                    updated_at = NOW()
                                    WHERE id = ?");
             $stmt->execute([$message, $exists['id']]);
         } else {
-            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, label, last_need, message_count) 
-                                   VALUES (?, ?, 'follow-up', ?, 1)");
+            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, last_need, message_count)
+                                   VALUES (?, ?, ?, 1)");
             $stmt->execute([$user_id ?: null, $session_id, $message]);
         }
     } catch (Exception $e) {
@@ -610,8 +622,8 @@ if ($parsed_dt) {
                                    WHERE id = ?");
             $stmt->execute([$message, $exists['id']]);
         } else {
-            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, label, last_need, message_count) 
-                                   VALUES (?, ?, 'follow-up', ?, 1)");
+            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, last_need, message_count)
+                                   VALUES (?, ?, ?, 1)");
             $stmt->execute([$user_id ?: null, $session_id, $message]);
         }
     } catch (Exception $e) {
@@ -637,24 +649,24 @@ if ($parsed_dt) {
         }
     }
     
-    // Cập nhật phân tích khách hàng (gửi thư rác nếu không có tìm kiếm sản phẩm và không có đặt chỗ)
+        // A legitimate generic message is normal. Spam requires explicit abuse
+        // signals and is evaluated independently by CustomerScoringService.
     try {
         $check = $pdo->prepare("SELECT id FROM customer_analysis WHERE (user_id = ? OR (user_id IS NULL AND ? IS NULL)) AND session_id = ? LIMIT 1");
         $check->execute([$user_id ?: null, $user_id ?: null, $session_id]);
         $exists = $check->fetch();
         
         if ($exists) {
-            $stmt = $pdo->prepare("UPDATE customer_analysis SET 
-                                   label = IF(label = 'potential' OR has_appointment = 1 OR product_interest IS NOT NULL, label, 'spam'),
-                                   last_need = ?,
+            // Greetings are not a customer need: count the message, keep the last real need.
+            $stmt = $pdo->prepare("UPDATE customer_analysis SET
                                    message_count = message_count + 1,
                                    updated_at = NOW()
                                    WHERE id = ?");
-            $stmt->execute([$message, $exists['id']]);
+            $stmt->execute([$exists['id']]);
         } else {
-            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, label, last_need, message_count) 
-                                   VALUES (?, ?, 'spam', ?, 1)");
-            $stmt->execute([$user_id ?: null, $session_id, $message]);
+            $stmt = $pdo->prepare("INSERT INTO customer_analysis (user_id, session_id, message_count)
+                                   VALUES (?, ?, 1)");
+            $stmt->execute([$user_id ?: null, $session_id]);
         }
     } catch (Exception $e) {
         error_log("Chat_Send.php: Error updating customer analysis: " . $e->getMessage());
@@ -678,30 +690,25 @@ try {
 // Tạo/cập nhật hồ sơ khách hàng không đăng nhập (khách vãng lai).
 if ($user_id == 0 && !empty($session_id)) {
     try {
-        // Kiểm tra xem khách hàng không đăng ký có mặt hay không.
-        $check_guest = $pdo->prepare("SELECT id FROM guest_customers WHERE session_id = ? LIMIT 1");
-        $check_guest->execute([$session_id]);
-        $exists_guest = $check_guest->fetch();
-
-        if (!$exists_guest) {
-            // Tạo khách hàng khách mới với session_id làm tên giữ chỗ.
-            $guest_name = "Khách vãng lai #" . substr($session_id, 0, 8);
-            $stmt = $pdo->prepare("INSERT INTO guest_customers (session_id, name, phone, notes) VALUES (?, ?, '', ?)");
-            $stmt->execute([$session_id, $guest_name, "Chat started at " . date('Y-m-d H:i:s')]);
-        } else {
-            // Cập nhật dấu thời gian của khách hàng hiện có
-            $stmt = $pdo->prepare("UPDATE guest_customers SET updated_at = NOW() WHERE id = ?");
-            $stmt->execute([$exists_guest['id']]);
-        }
+        // Một hồ sơ cho mỗi phiên (uq_guest_session): tạo tên giữ chỗ lần đầu, sau đó chỉ cập nhật thời gian.
+        $stmt = $pdo->prepare("INSERT INTO guest_customers (session_id, name, phone, notes) VALUES (?, ?, '', ?)
+                               ON DUPLICATE KEY UPDATE updated_at = NOW()");
+        $stmt->execute([$session_id, "Khách vãng lai #" . substr($session_id, 0, 8), "Chat started at " . date('Y-m-d H:i:s')]);
     } catch (Exception $e) {
         error_log("Chat_Send.php: Error creating/updating guest customer: " . $e->getMessage());
     }
 }
+
+// Chấm lại điểm tiềm năng ngay sau tin nhắn (lỗi chấm điểm không ảnh hưởng chat).
+CustomerScoringService::refreshQuietly($user_id > 0 ? (int) $user_id : null, $session_id);
 
 // Trả về phản hồi
 echo json_encode([
     'ok' => true,
     'reply' => $reply,
     'language' => $lang,
-    'has_booking_form' => $has_booking_form
+    'has_booking_form' => $has_booking_form,
+    'session_id' => $session_id,
+    'session' => chat_session_info($pdo, $session_id),
+    'upcoming_appointment' => chat_session_upcoming_appointment($pdo, $user_id, $session_id)
 ], JSON_UNESCAPED_UNICODE);

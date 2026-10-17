@@ -1,8 +1,9 @@
 <?php
 include("../DB_Connect.php");
-session_start();
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
 if (isset($_SESSION['user']) && isset($_POST['IDSanPham']) && isset($_POST['rating']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_csrf();
     $IDSanPham = intval($_POST['IDSanPham']);
     $rating = intval($_POST['rating']);
     
@@ -74,18 +75,6 @@ if (isset($_SESSION['user']) && isset($_POST['IDSanPham']) && isset($_POST['rati
         }
         exit();
     }
-    
-    // Create rating table if not exists
-    @mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `danhgia` (
-        `ID_DanhGia` INT AUTO_INCREMENT PRIMARY KEY,
-        `ID_KhachHang` INT NOT NULL,
-        `ID_SanPham` INT NOT NULL,
-        `SoSao` TINYINT(1) NOT NULL,
-        `ThoiGianTao` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY `unique_rating` (`ID_KhachHang`, `ID_SanPham`),
-        FOREIGN KEY (`ID_KhachHang`) REFERENCES `khachhang`(`ID_KhachHang`) ON DELETE CASCADE,
-        FOREIGN KEY (`ID_SanPham`) REFERENCES `sanpham`(`IDSanPham`) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
     
     // Check if user already rated this product
     $sql_check_existing = "SELECT ID_DanhGia FROM danhgia WHERE ID_KhachHang = '$id_user' AND ID_SanPham = '$IDSanPham'";

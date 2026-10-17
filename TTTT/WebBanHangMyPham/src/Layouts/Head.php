@@ -1,24 +1,14 @@
-<?php
-// Thay vì session_start() trần:
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-?>
+<?php require_once dirname(__DIR__, 3) . '/config/security.php'; ?>
 <!DOCTYPE html>
 <html lang="en">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="<?php echo htmlspecialchars(csrf_token(), ENT_QUOTES, 'UTF-8'); ?>">
     <title>Mơ Shop</title>
-    <link rel="stylesheet" href="/TTTT/Web_VanPhongPham/LIB/Bootstrap/css/bootstrap.min.css">
-    <!-- Bootstrap CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha3/dist/js/bootstrap.bundle.min.js"></script>
-
-
-    <!-- Bootstrap Bundle JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <link rel="stylesheet" href="/TTTT/WebBanHangMyPham/LIB/Bootstrap/css/bootstrap.min.css">
+    <script src="/TTTT/WebBanHangMyPham/LIB/Bootstrap/js/bootstrap.bundle.min.js" defer></script>
 
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 
@@ -26,15 +16,6 @@ if (session_status() === PHP_SESSION_NONE) {
     <script src="../../JS/script_Header.js" defer></script>
     <script src="../../JS/scrip_Cart.js" defer></script>
     <script src="../../JS/scrip_nav.js" defer></script>
-    <script>
-        // trigger background lead scoring occasionally
-        window.addEventListener('load', function(){
-            try {
-                setTimeout(function(){ fetch('../Processing/Score_Lead.php', {method:'POST'}); }, 3000);
-            } catch(e){}
-        });
-    </script>
-
     <link rel="stylesheet" href="../../CSS/style_SliderCard.css">
     <link rel="stylesheet" href="../../CSS/style_Header.css">
     <link rel="stylesheet" href="../../CSS/style_SliderBanner.css">
@@ -52,9 +33,6 @@ if (session_status() === PHP_SESSION_NONE) {
 
 <script>
     <?php
-        // BẢO ĐẢM CÓ SESSION
-        if (session_status() === PHP_SESSION_NONE) { session_start(); }
-
         // Tạo UID ổn định cho chat
         $chat_uid = 0;
         if (isset($_SESSION['IDNguoiDung']) && $_SESSION['IDNguoiDung']) {
@@ -71,18 +49,25 @@ if (session_status() === PHP_SESSION_NONE) {
         elseif (!empty($_SESSION['user']))         $chat_name = $_SESSION['user'];
     ?>
         // ==== Config cho widget ====
-        window.CHAT_BACKEND_URL = "http://127.0.0.1:8010";
         window.CHAT_PHP_BASE    = "/TTTT/WebBanHangMyPham/src/Processing";
         window.CURRENT_USER_ID  = <?= (int)$chat_uid ?>;
         window.CURRENT_USER_NAME= <?= json_encode($chat_name ?: 'bạn', JSON_UNESCAPED_UNICODE) ?>;
+        window.CHAT_CSRF_TOKEN  = <?= json_encode(csrf_token()) ?>;
+        window.CHAT_PERSONAL_URL= "/TTTT/WebBanHangMyPham/src/View/Personal.php";
 </script>
 
-<!-- ép tải lại JS nếu cần -->
-<script src="/TTTT/WebBanHangMyPham/JS/chat_widget.js?v=20251103a" defer></script>
+<?php if (app_bool('AI_CHAT_ENABLED')): ?>
+<script src="/TTTT/WebBanHangMyPham/JS/chat_widget.js?v=20261017-1" defer></script>
+<?php endif; ?>
 
 <!-- Realtime WebSocket Client -->
+<?php if ((app_env('REALTIME_WS_URL', '') ?? '') !== ''): ?>
 <script src="/TTTT/WebBanHangMyPham/JS/websocket_client.js"></script>
 <script>
+    window.WEBSOCKET_URL = <?= json_encode(app_env('REALTIME_WS_URL'), JSON_UNESCAPED_SLASHES) ?>;
+    window.REALTIME_TICKET_URL = "/TTTT/WebBanHangMyPham/src/Processing/Realtime_Ticket.php";
+    window.REALTIME_CONTEXT = "customer";
+    window.REALTIME_CSRF_TOKEN = <?= json_encode(csrf_token()) ?>;
     // Initialize WebSocket with user role
     document.addEventListener('DOMContentLoaded', function() {
         <?php
@@ -97,12 +82,10 @@ if (session_status() === PHP_SESSION_NONE) {
             $user_role = $_SESSION['Role'];
         }
         
-        // Debug: Log role detection
-        error_log("Head.php: Detected role = {$user_role}, user_id = " . ($user_id ?: 'null'));
         ?>
-        console.log('🔌 Head.php: Initializing WebSocket with role:', '<?php echo $user_role; ?>', 'user_id:', <?php echo $user_id ?: 'null'; ?>);
         initRealtimeWebSocket('<?php echo $user_role; ?>', <?php echo $user_id ?: 'null'; ?>);
     });
 </script>
+<?php endif; ?>
 
 </head>

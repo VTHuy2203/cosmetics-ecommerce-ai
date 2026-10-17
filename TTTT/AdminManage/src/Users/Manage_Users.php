@@ -12,79 +12,35 @@
   $is_admin = isset($_SESSION['admin_is_admin']) && $_SESSION['admin_is_admin'] === true;
 
   // Danh sách KH
-  $sql = "SELECT * FROM khachhang";
+  $sql = "SELECT * FROM khachhang WHERE Role = 'customer' OR Role IS NULL";
   $result = mysqli_query($conn, $sql);
   if (!$result) { die("Có lỗi xảy ra: " . mysqli_error($conn)); }
 
-  // Nạp nhãn lead từ bảng customer_analysis (prioritize this) và leads (fallback)
+  // One scoring source of truth. khachhang is a compatibility fallback until
+  // the first scoring run has created a current snapshot.
   $leadMap = [];
-  // Try PDO for customer_analysis table FIRST (new system)
   try {
-    $pdo = new PDO("mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4", "root", "", [
-      PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-      PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
-    // First try customer_analysis table - get latest data per user_id
-    try {
-      $caStmt = $pdo->query("SELECT user_id, label, has_appointment, product_interest, last_need 
-                             FROM customer_analysis 
-                             WHERE user_id IS NOT NULL 
-                             ORDER BY updated_at DESC");
-      while($ca = $caStmt->fetch()) {
-        $uid = (int)$ca['user_id'];
-        // Only update if we haven't seen this user_id yet (to get the latest record)
-        if (!isset($leadMap[$uid])) {
-          $label = $ca['label'] ?? 'spam';
-          // Map customer_analysis labels: potential -> potential, follow-up -> neutral, spam -> spam
-          $leadLabel = $label === 'potential' ? 'potential' : ($label === 'follow-up' ? 'neutral' : 'spam');
-          $score = $label === 'potential' ? 90 : ($label === 'follow-up' ? 50 : 30);
-          $leadMap[$uid] = [
-            'label' => $leadLabel,
-            'score' => $score,
-            'probability' => $score / 100.0,
-            'last_need' => $ca['last_need'] ?? null,
-            'product_interest' => $ca['product_interest'] ?? null
-          ];
-        }
-      }
-    } catch (Exception $e) {
-      // customer_analysis table might not exist, try leads table
-      error_log("Manage_Users.php: Error fetching customer_analysis: " . $e->getMessage());
+    $pdo = app_pdo();
+    $scoreStmt = $pdo->query("SELECT user_id, segment AS label, intent_score AS score,
+                                    spam_risk_score, value_score, value_tier, reason_codes,
+                                    scoring_version, calculated_at, manual_segment
+                             FROM customer_scores_current WHERE user_id IS NOT NULL");
+    while ($scoreRow = $scoreStmt->fetch()) {
+      $leadMap[(int) $scoreRow['user_id']] = $scoreRow;
     }
-    
-    // Fallback to leads table if customer_analysis didn't have data
-    if (empty($leadMap)) {
-      try {
-        $leadStmt = $pdo->query("SELECT user_id, label, score FROM leads WHERE user_id IS NOT NULL");
-        while($lr = $leadStmt->fetch()) {
-          $uid = (int)$lr['user_id'];
-          if (!isset($leadMap[$uid])) {
-            $leadMap[$uid] = [
-              'label' => $lr['label'] ?? 'neutral',
-              'score' => $lr['score'] ?? 0,
-              'probability' => min(100, max(0, (int)$lr['score'])) / 100.0
-            ];
-          }
-        }
-      } catch (Exception $e) {
-        // leads table might not exist
+
+    $fallback = $pdo->query("SELECT ID_KhachHang AS user_id, customer_label AS label,
+                                   lead_score AS score, spam_risk_score, customer_value_score AS value_score,
+                                   customer_value_tier AS value_tier, scoring_version, label_updated_at AS calculated_at
+                            FROM khachhang WHERE Role = 'customer' OR Role IS NULL");
+    while ($scoreRow = $fallback->fetch()) {
+      $uid = (int) $scoreRow['user_id'];
+      if (!isset($leadMap[$uid])) {
+        $leadMap[$uid] = $scoreRow;
       }
     }
   } catch (Exception $e) {
-    // PDO connection failed, try mysqli fallback
-  }
-  
-  // Fallback to lead_scores if PDO failed
-  if (empty($leadMap)) {
-    $leadRes = mysqli_query($conn, "SELECT user_id, label, probability FROM lead_scores WHERE user_id IS NOT NULL");
-    if ($leadRes) {
-      while($lr = mysqli_fetch_assoc($leadRes)) {
-        $uid = (int)$lr['user_id'];
-        if (!isset($leadMap[$uid])) {
-          $leadMap[$uid] = $lr;
-        }
-      }
-    }
+    error_log('Manage_Users scoring data error: ' . $e->getMessage());
   }
 ?>
 
@@ -108,7 +64,8 @@
                 <select id="lead_filter" name="lead" onchange="this.form.submit()">
                   <option value="">Tất cả</option>
                   <option value="potential" <?php echo (isset($_GET['lead']) && $_GET['lead']==='potential')?'selected':''; ?>>Tiềm năng</option>
-                  <option value="neutral"   <?php echo (isset($_GET['lead']) && $_GET['lead']==='neutral')  ?'selected':''; ?>>Trung tính</option>
+                  <option value="follow-up" <?php echo (isset($_GET['lead']) && $_GET['lead']==='follow-up')?'selected':''; ?>>Đang theo dõi</option>
+                  <option value="normal"    <?php echo (isset($_GET['lead']) && $_GET['lead']==='normal')   ?'selected':''; ?>>Bình thường</option>
                   <option value="spam"      <?php echo (isset($_GET['lead']) && $_GET['lead']==='spam')     ?'selected':''; ?>>Spam</option>
                 </select>
               </form>
@@ -178,37 +135,50 @@
                         while ($p = mysqli_fetch_array($pending)) {
                           echo '<div class="mb-1">'
                                .number_format($p['SoTien'],0,',','.').' đ - '.htmlspecialchars($p['NoiDung'])
-                               .' <a class="btn btn-sm btn-success" href="Confirm_Deposit.php?id='.$p['ID_Nap'].'">Xác nhận</a>'
-                               .' <a class="btn btn-sm btn-outline-danger" href="Reject_Deposit.php?id='.$p['ID_Nap'].'">Từ chối</a></div>';
+                               .(in_array($admin_role, ['admin', 'manager'], true)
+                                    ? admin_deposit_form((int) $p['ID_Nap'], true) . ' ' . admin_deposit_form((int) $p['ID_Nap'], false)
+                                    : '<span class="badge bg-secondary">Chỉ quản trị viên xử lý</span>')
+                               .'</div>';
                         }
                       }
                       echo '</td>';
 
-                      // Lead badge + % - Default to Potential if analyzed
+                      // Lead badge + explainable score from the centralized engine.
                       $badge = '<span class="badge bg-secondary">N/A</span>';
                       $prob  = '';
                       $leadId = 'lead-' . $uid;
                       
                       if ($lead) {
-                          $label = $lead['label'] ?? 'neutral';
-                          // Map labels to Potential if analyzed
-                          if ($label==='potential' || $label==='Tiềm năng cao' || $label==='Đã đặt lịch') {
-                            $badge = '<span class="badge bg-primary" id="' . $leadId . '-badge">Potential</span>';
-                          } else if ($label==='average' || $label==='Cần chăm sóc') {
-                            $badge = '<span class="badge bg-info text-dark" id="' . $leadId . '-badge">Potential</span>';
-                          } else if ($label==='normal') {
-                            $badge = '<span class="badge bg-warning text-dark" id="' . $leadId . '-badge">Potential</span>';
+                          $label = $lead['label'] ?? 'normal';
+                          if ($label === 'potential') {
+                            $badge = '<span class="badge bg-primary" id="' . $leadId . '-badge">Tiềm năng</span>';
+                          } else if ($label === 'follow-up' || $label === 'neutral') {
+                            $badge = '<span class="badge bg-warning text-dark" id="' . $leadId . '-badge">Đang theo dõi</span>';
+                          } else if ($label === 'normal') {
+                            $badge = '<span class="badge bg-secondary" id="' . $leadId . '-badge">Bình thường</span>';
                           } else if ($label==='spam') {
                             $badge = '<span class="badge bg-danger" id="' . $leadId . '-badge">Spam</span>';
                           } else {
-                            // Default to Potential for analyzed customers
-                            $badge = '<span class="badge bg-primary" id="' . $leadId . '-badge">Potential</span>';
+                            $badge = '<span class="badge bg-secondary" id="' . $leadId . '-badge">Chưa phân loại</span>';
                           }
 
-                          $score = isset($lead['score']) ? (int)$lead['score'] : (isset($lead['probability']) ? round(floatval($lead['probability'])*100) : 90);
-                          $prob = '<span id="' . $leadId . '-prob">' . $score . '%</span>';
+                          $score = max(0, min(100, (int) ($lead['score'] ?? 0)));
+                          $reasonText = '';
+                          if (!empty($lead['reason_codes'])) {
+                            $decodedReasons = json_decode((string) $lead['reason_codes'], true);
+                            if (is_array($decodedReasons)) {
+                              $reasonLines = [];
+                              foreach ($decodedReasons as $reason) {
+                                $reasonLines[] = sprintf('%+d %s', (int) ($reason['points'] ?? 0), (string) ($reason['label'] ?? ''));
+                              }
+                              $reasonText = implode("\n", $reasonLines);
+                            }
+                          }
+                          $prob = '<span id="' . $leadId . '-prob" title="' . htmlspecialchars($reasonText, ENT_QUOTES) . '">' . $score . ' điểm</span>';
+                          $valueTier = htmlspecialchars((string) ($lead['value_tier'] ?? 'new'));
+                          $prob .= '<div class="small text-muted">Giá trị: ' . $valueTier . '</div>';
                       } else {
-                          // Not analyzed yet - will be set to Potential after analysis
+                          // Chưa có đủ dữ liệu để engine phân loại.
                           $badge = '<span class="badge bg-secondary" id="' . $leadId . '-badge">Chưa phân tích</span>';
                       }
 
@@ -231,34 +201,21 @@
                             }
                           }
                         } catch (Exception $e) {}
-                        
-                        // Final fallback to leads table
-                        if (!$need) {
-                          try {
-                            if (isset($pdo)) {
-                              $needStmt = $pdo->prepare("SELECT last_message, product_interest FROM leads WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1");
-                              $needStmt->execute([$uid]);
-                              $needRow = $needStmt->fetch();
-                              if ($needRow) {
-                                $need = $needRow['product_interest'] ?: $needRow['last_message'] ?: '';
-                              }
-                            }
-                          } catch (Exception $e) {}
-                        }
-                        
-                        // Final fallback to customer_needs table
-                        if (!$need) {
-                          $qn = mysqli_query($conn, "SELECT need_text FROM customer_needs WHERE user_id=$uid ORDER BY created_at DESC LIMIT 1");
-                          if ($qn && ($nr = mysqli_fetch_assoc($qn))) { $need = $nr['need_text']; }
-                        }
                       }
 
                       echo ' <td id="' . $leadId . '">'.$badge.' '.$prob.' <div class="small text-muted">'.htmlspecialchars($need).'</div></td>';
 
                       // Action buttons
-                      echo ' <td>
+                      $segmentButton = in_array($admin_role, ['admin', 'manager'], true)
+                        ? '<button class="btn btn-sm btn-outline-secondary" onclick="overrideSegment('.$uid.')" title="Điều chỉnh phân loại">Phân loại</button>'
+                        : '';
+                      $deleteButton = in_array($admin_role, ['admin', 'manager'], true)
+                        ? '<button class="btn btn-sm btn-outline-danger" onclick="deleteUser('.$uid.', \''.htmlspecialchars($ten, ENT_QUOTES).'\')" title="Xóa khách hàng">Xóa</button>'
+                        : '';
+                      echo '<td>
                         <a class="btn btn-sm btn-outline-primary" href="Customer_Detail.php?id='.$uid.'">Xem</a>
-                        <button class="btn btn-sm btn-outline-danger" onclick="deleteUser('.$uid.', \''.htmlspecialchars($ten, ENT_QUOTES).'\')" title="Xóa khách hàng">Xóa</button>
+                        '.$segmentButton.'
+                        '.$deleteButton.'
                       </td>';
 
                       echo '</tr>';
@@ -293,10 +250,20 @@
       
       // Call Score_Lead.php to analyze all leads
       fetch('/TTTT/WebBanHangMyPham/src/Processing/Score_Lead.php', {
-        method: 'GET',
-        credentials: 'same-origin'
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Accept': 'application/json',
+          'X-CSRF-Token': <?php echo json_encode(csrf_token()); ?>
+        }
       })
-      .then(res => res.json())
+      .then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || 'Máy chủ không thể xử lý yêu cầu');
+        }
+        return data;
+      })
       .then(data => {
         if (data.ok) {
           // Update all lead displays
@@ -314,7 +281,7 @@
       })
       .catch(err => {
         console.error('Analysis error:', err);
-        alert('Lỗi khi phân tích: ' + err.message);
+        alert('Không thể phân tích khách hàng: ' + err.message);
         btn.disabled = false;
         text.textContent = 'Phân tích khách hàng';
         spinner.classList.add('d-none');
@@ -351,6 +318,41 @@
     }
     
     // Delete user
+    async function overrideSegment(userId) {
+      const segment = prompt('Nhập nhãn: auto, normal, follow-up, potential hoặc spam');
+      if (segment === null) return;
+      const normalized = segment.trim().toLowerCase();
+      if (!['auto', 'normal', 'follow-up', 'potential', 'spam'].includes(normalized)) {
+        alert('Nhãn không hợp lệ.');
+        return;
+      }
+      const reason = normalized === 'auto' ? 'automatic' : prompt('Nhập lý do thay đổi nhãn:');
+      if (reason === null || (normalized !== 'auto' && reason.trim().length < 3)) {
+        alert('Cần nhập lý do ít nhất 3 ký tự.');
+        return;
+      }
+      try {
+        const body = new URLSearchParams({user_id: String(userId), segment: normalized, reason: reason.trim()});
+        const response = await fetch('Update_Customer_Segment.php', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            'Accept': 'application/json',
+            'X-CSRF-Token': <?php echo json_encode(csrf_token()); ?>
+          },
+          body
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || 'Không thể cập nhật');
+        alert(data.message || 'Đã cập nhật phân loại.');
+        location.reload();
+      } catch (error) {
+        alert('Lỗi: ' + error.message);
+      }
+    }
+
+    // Delete user
     function deleteUser(userId, userName) {
       if (!confirm('Bạn có chắc chắn muốn xóa khách hàng "' + userName + '" (ID: ' + userId + ')?\n\nHành động này không thể hoàn tác!')) {
         return;
@@ -360,6 +362,7 @@
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
+          'X-CSRF-Token': <?php echo json_encode(csrf_token()); ?>
         },
         credentials: 'same-origin',
         body: 'user_id=' + userId

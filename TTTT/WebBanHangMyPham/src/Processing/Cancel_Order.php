@@ -6,11 +6,9 @@
 
 ob_start();
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__) . '/Services/VoucherService.php';
 
 // Check if user is logged in
 if (!isset($_SESSION['user'])) {
@@ -23,6 +21,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo 'error: Phương thức yêu cầu không hợp lệ.';
     exit();
 }
+require_csrf();
 
 // Get and validate input
 $order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : 0;
@@ -35,31 +34,35 @@ if ($order_id <= 0) {
     exit();
 }
 
-if (empty($cancel_reason)) {
+if (mb_strlen($cancel_reason) < 3 || mb_strlen($cancel_reason) > 500) {
     echo 'error: Vui lòng nhập lý do hủy đơn hàng.';
     exit();
 }
 
 // Get user ID
-$sql_user = "SELECT ID_KhachHang FROM khachhang WHERE TenDangNhap = '" . mysqli_real_escape_string($conn, $_SESSION['user']) . "'";
-$result_user = mysqli_query($conn, $sql_user);
-if (!$result_user || mysqli_num_rows($result_user) == 0) {
+$userStmt = $conn->prepare('SELECT ID_KhachHang FROM khachhang WHERE TenDangNhap = ? LIMIT 1');
+$userStmt->bind_param('s', $_SESSION['user']);
+$userStmt->execute();
+$row_user = $userStmt->get_result()->fetch_assoc();
+if (!$row_user) {
     echo 'error: Không tìm thấy thông tin người dùng.';
     exit();
 }
-$row_user = mysqli_fetch_array($result_user);
 $customer_id = intval($row_user['ID_KhachHang']);
 
 // Get order information
-$sql_order = "SELECT * FROM donhang WHERE ID_DonHang = $order_id AND ID_KhachHang = $customer_id";
-$result_order = mysqli_query($conn, $sql_order);
+$conn->begin_transaction();
+$orderStmt = $conn->prepare('SELECT * FROM donhang WHERE ID_DonHang = ? AND ID_KhachHang = ? FOR UPDATE');
+$orderStmt->bind_param('ii', $order_id, $customer_id);
+$orderStmt->execute();
+$order = $orderStmt->get_result()->fetch_assoc();
 
-if (!$result_order || mysqli_num_rows($result_order) == 0) {
+if (!$order) {
+    $conn->rollback();
     echo 'error: Đơn hàng không tồn tại hoặc bạn không có quyền hủy đơn hàng này.';
     exit();
 }
 
-$order = mysqli_fetch_array($result_order);
 $order_status = intval($order['TrangThai']);
 $id_shipper = isset($order['ID_Shipper']) ? intval($order['ID_Shipper']) : 0;
 $is_paid = isset($order['DaThanhToan']) && intval($order['DaThanhToan']) == 1;
@@ -70,74 +73,50 @@ $ghi_chu = isset($order['GhiChu']) ? $order['GhiChu'] : '';
 $can_cancel = ($order_status == 0) || ($order_status == 1 && ($id_shipper == 0 || is_null($order['ID_Shipper'])));
 
 if (!$can_cancel) {
+    $conn->rollback();
     echo 'error: Đơn hàng không thể hủy tại thời điểm này.';
     exit();
 }
 
 // Check COD cancellation - if shipper has accepted, cannot cancel
 if ($payment_method === 'cod' && $id_shipper > 0) {
+    $conn->rollback();
     echo 'error: Đơn hàng đang được giao và không thể hủy tại thời điểm này.';
     exit();
 }
 
-// Start transaction
-mysqli_begin_transaction($conn);
-
 try {
-    // Determine actual payment method from GhiChu if not provided correctly
-    $actual_payment_method = $payment_method;
-    if (stripos($ghi_chu, 'Thanh toán bằng số dư tài khoản') !== false) {
-        $actual_payment_method = 'balance';
-    } elseif (stripos($ghi_chu, 'QR:') !== false) {
-        $actual_payment_method = 'qr';
-    } else {
-        $actual_payment_method = 'cod';
+    // The server-side order value is authoritative; never trust the submitted method.
+    $actual_payment_method = (string) ($order['PhuongThucThanhToan'] ?? '');
+    if (!in_array($actual_payment_method, ['cod', 'qr', 'balance', 'sepay_pg'], true)) {
+        $actual_payment_method = stripos($ghi_chu, 'Thanh toán bằng số dư tài khoản') !== false
+            ? 'balance'
+            : (stripos($ghi_chu, 'QR:') !== false ? 'qr' : 'cod');
+    }
+
+    if ($actual_payment_method === 'qr' && $is_paid && $qr_refund_agreed !== 1) {
+        throw new DomainException('Bạn cần đồng ý nhận khoản hoàn vào số dư trước khi hủy đơn QR đã thanh toán.');
+    }
+    if ($actual_payment_method === 'sepay_pg' && $is_paid) {
+        throw new DomainException('Đơn đã thanh toán qua SePay cần được nhân viên xử lý hoàn tiền và đối soát.');
+    }
+
+    $refundApplied = $is_paid && in_array($actual_payment_method, ['balance', 'qr'], true);
+    if ($refundApplied) {
+        $refund = $conn->prepare('UPDATE khachhang SET SoDu = SoDu + ? WHERE ID_KhachHang = ?');
+        $refund->bind_param('ii', $order_amount, $customer_id);
+        $refund->execute();
+        if ($refund->affected_rows !== 1) {
+            throw new RuntimeException('Không thể hoàn tiền vào số dư.');
+        }
     }
     
-    // Handle refund based on payment method
-    if ($actual_payment_method === 'balance' && $is_paid) {
-        // Refund to account balance
-        // Ensure SoDu column exists
-        $check_col = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khachhang' AND COLUMN_NAME = 'SoDu'");
-        $col_exists = false;
-        if ($check_col) {
-            $col_row = mysqli_fetch_assoc($check_col);
-            $col_exists = intval($col_row['c']) > 0;
-        }
-        if (!$col_exists) {
-            @mysqli_query($conn, "ALTER TABLE `khachhang` ADD `SoDu` BIGINT NOT NULL DEFAULT 0 AFTER `DiaChi`");
-        }
-        
-        // Refund amount to customer account
-        $refund_result = mysqli_query($conn, "UPDATE khachhang SET SoDu = SoDu + $order_amount WHERE ID_KhachHang = $customer_id");
-        if (!$refund_result) {
-            throw new Exception('Lỗi khi hoàn tiền vào tài khoản: ' . mysqli_error($conn));
-        }
-    } elseif ($actual_payment_method === 'qr' && $is_paid && $qr_refund_agreed == 1) {
-        // Refund QR payment to account balance (user agreed)
-        // Ensure SoDu column exists
-        $check_col = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khachhang' AND COLUMN_NAME = 'SoDu'");
-        $col_exists = false;
-        if ($check_col) {
-            $col_row = mysqli_fetch_assoc($check_col);
-            $col_exists = intval($col_row['c']) > 0;
-        }
-        if (!$col_exists) {
-            @mysqli_query($conn, "ALTER TABLE `khachhang` ADD `SoDu` BIGINT NOT NULL DEFAULT 0 AFTER `DiaChi`");
-        }
-        
-        // Refund amount to customer account
-        $refund_result = mysqli_query($conn, "UPDATE khachhang SET SoDu = SoDu + $order_amount WHERE ID_KhachHang = $customer_id");
-        if (!$refund_result) {
-            throw new Exception('Lỗi khi hoàn tiền vào tài khoản: ' . mysqli_error($conn));
-        }
-    }
-    // For COD or QR without agreement, no refund needed (cash refund by shipper)
-    
-    // Restore stock if order was approved (status >= 1)
-    if ($order_status >= 1) {
-        $sql_order_details = "SELECT ID_SanPham, SoLuong FROM donhangchitiet WHERE ID_DonHang = $order_id";
-        $result_order_details = mysqli_query($conn, $sql_order_details);
+    // Restore reserved stock exactly once, regardless of fulfilment status.
+    if ((int) ($order['TonKhoDaGiu'] ?? 0) === 1) {
+        $details = $conn->prepare('SELECT ID_SanPham, SoLuong FROM donhangchitiet WHERE ID_DonHang = ?');
+        $details->bind_param('i', $order_id);
+        $details->execute();
+        $result_order_details = $details->get_result();
         
         if ($result_order_details) {
             while ($order_detail = mysqli_fetch_array($result_order_details)) {
@@ -145,30 +124,47 @@ try {
                 $quantity = intval($order_detail['SoLuong']);
                 
                 // Restore stock
-                $restore_stock = mysqli_query($conn, "UPDATE sanpham SET SoLuong = SoLuong + $quantity WHERE IDSanPham = $product_id");
-                if (!$restore_stock) {
-                    throw new Exception('Lỗi khi khôi phục tồn kho sản phẩm: ' . mysqli_error($conn));
-                }
+                $restoreStock = $conn->prepare('UPDATE sanpham SET SoLuong = SoLuong + ? WHERE IDSanPham = ?');
+                $restoreStock->bind_param('ii', $quantity, $product_id);
+                $restoreStock->execute();
             }
         }
     }
+
+    (new VoucherService($conn))->releaseForOrder($order_id, 'customer_cancelled');
     
     // Update order status to cancelled (status = -1 or update GhiChu with cancellation info)
     // We'll mark it as cancelled by updating GhiChu and setting a special status
     // First, check if we need to add a cancellation status column or use existing status
-    $cancel_reason_escaped = mysqli_real_escape_string($conn, $cancel_reason);
-    $updated_ghi_chu = $ghi_chu . ' | [ĐÃ HỦY] Lý do: ' . $cancel_reason_escaped;
+    $updated_ghi_chu = mb_substr($ghi_chu . ' | [ĐÃ HỦY] Lý do: ' . $cancel_reason, 0, 255);
     
     // Update order - set status to a cancelled state (we'll use -1 for cancelled)
     // But first check if status column can handle negative values
-    $update_order = mysqli_query($conn, "UPDATE donhang SET TrangThai = -1, GhiChu = '$updated_ghi_chu' WHERE ID_DonHang = $order_id");
+    $paymentStatus = $refundApplied
+        ? 'refunded'
+        : (in_array($actual_payment_method, ['qr', 'sepay_pg'], true) ? 'expired' : 'cod_pending');
+    $updateStmt = $conn->prepare(
+        'UPDATE donhang SET TrangThai = -1, GhiChu = ?, TrangThaiThanhToan = ?, TonKhoDaGiu = 0 WHERE ID_DonHang = ?'
+    );
+    $updateStmt->bind_param('ssi', $updated_ghi_chu, $paymentStatus, $order_id);
+    $update_order = $updateStmt->execute();
     if (!$update_order) {
-        // If -1 doesn't work, try updating GhiChu only and keep status
-        $update_order = mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu' WHERE ID_DonHang = $order_id");
-        if (!$update_order) {
-            throw new Exception('Lỗi khi cập nhật trạng thái đơn hàng: ' . mysqli_error($conn));
-        }
+        throw new Exception('Lỗi khi cập nhật trạng thái đơn hàng: ' . mysqli_error($conn));
     }
+
+    $payload = json_encode([
+        'order_id' => $order_id,
+        'user_id' => $customer_id,
+        'refund_amount' => $refundApplied ? $order_amount : 0,
+        'reason' => mb_substr($cancel_reason, 0, 255),
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $event = $conn->prepare(
+        "INSERT INTO outbox_events(event_type, aggregate_type, aggregate_id, payload)
+         VALUES ('order.cancelled', 'order', ?, ?)"
+    );
+    $aggregateId = (string) $order_id;
+    $event->bind_param('ss', $aggregateId, $payload);
+    $event->execute();
     
     // Commit transaction
     mysqli_commit($conn);

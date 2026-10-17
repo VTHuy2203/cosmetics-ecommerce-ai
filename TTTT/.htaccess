@@ -1,0 +1,23 @@
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule (^|/)\.(?!well-known/) - [F,L]
+    # Admin UI libraries (jQuery, Bootstrap, Font Awesome...) are static assets, not Composer packages.
+    RewriteRule ^AdminManage/vendor/.+\.(?:js|css|map|woff2?|ttf|eot|otf|svg)$ - [L,NC]
+    RewriteRule (^|/)(?:config|database|bin|vendor|storage|WebSocketServer)(?:/|$) - [F,L,NC]
+    RewriteRule ^WebBanHangMyPham/src/(?:ML|RAG|uploads)(?:/|$) - [F,L,NC]
+    RewriteRule (^|/)(?:composer\.(?:json|lock)|sanpham\.csv|[^/]+\.(?:sql|sqlite3?|db|log))$ - [F,L,NC]
+</IfModule>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    Header always set Cache-Control "no-store, private" "expr=%{REQUEST_URI} =~ m#/(?:View|Processing|Webhooks|AdminManage)/#"
+</IfModule>
+
+<FilesMatch "(?i)^(?:\.env(?:\..*)?|composer\.(?:json|lock)|.*\.(?:sql|sqlite3?|db|log))$">
+    Require all denied
+</FilesMatch>

@@ -3,8 +3,9 @@
  * Staff Canceled Orders Page
  * Displays all canceled orders with cancellation reasons
  */
-include("../Layouts/headHTML.php");
-include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once '../DB_Connect.php';
+require_once '../Layouts/Admin_Access_Check.php';
 
 // Check staff access
 $admin_role = $_SESSION['admin_role'] ?? null;
@@ -34,14 +35,21 @@ $sql_refused = "SELECT d.*, k.HoVaTen, k.Email, k.SDT, k.DiaChi, s.HoVaTen as Sh
 $result_refused = mysqli_query($conn, $sql_refused);
 
 // Handle shipper returned goods to shop (staff action)
-if (isset($_GET['mark_returned']) && $_GET['mark_returned'] > 0) {
-    $order_id = intval($_GET['mark_returned']);
-    $status = isset($_GET['status']) ? $_GET['status'] : 'returned';
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && isset($_POST['mark_returned'], $_POST['status'])) {
+    require_csrf();
+    $order_id = filter_var($_POST['mark_returned'], FILTER_VALIDATE_INT);
+    $status = (string) $_POST['status'];
+    if ($order_id === false || $order_id < 1 || !in_array($status, ['returned', 'not_returned'], true)) {
+        http_response_code(422);
+        exit('invalid_return_status');
+    }
     
     // Get order info
-    $order_query = mysqli_query($conn, "SELECT GhiChu, ID_KhachHang, HoVaTen FROM donhang WHERE ID_DonHang = $order_id");
-    if ($order_query && mysqli_num_rows($order_query) > 0) {
-        $order_row = mysqli_fetch_array($order_query);
+    $order_statement = $conn->prepare('SELECT GhiChu, ID_KhachHang, HoVaTen FROM donhang WHERE ID_DonHang = ?');
+    $order_statement->bind_param('i', $order_id);
+    $order_statement->execute();
+    $order_row = $order_statement->get_result()->fetch_assoc();
+    if ($order_row) {
         $current_ghi_chu = $order_row['GhiChu'] ?? '';
         $customer_id = intval($order_row['ID_KhachHang']);
         $customer_name = $order_row['HoVaTen'] ?? 'Khách hàng';
@@ -50,8 +58,9 @@ if (isset($_GET['mark_returned']) && $_GET['mark_returned'] > 0) {
             // Mark as returned
             if (stripos($current_ghi_chu, '[ĐÃ TRẢ VỀ CỬA HÀNG]') === false) {
                 $updated_ghi_chu = $current_ghi_chu . ' | [ĐÃ TRẢ VỀ CỬA HÀNG]';
-                $updated_ghi_chu_escaped = mysqli_real_escape_string($conn, $updated_ghi_chu);
-                mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu_escaped' WHERE ID_DonHang = $order_id");
+                $update_statement = $conn->prepare('UPDATE donhang SET GhiChu = ? WHERE ID_DonHang = ?');
+                $update_statement->bind_param('si', $updated_ghi_chu, $order_id);
+                $update_statement->execute();
                 
                 // Send notification to Admin and Staff
                 $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
@@ -81,14 +90,17 @@ if (isset($_GET['mark_returned']) && $_GET['mark_returned'] > 0) {
             // Mark as not returned (remove the marker)
             $updated_ghi_chu = str_ireplace('| [ĐÃ TRẢ VỀ CỬA HÀNG]', '', $current_ghi_chu);
             $updated_ghi_chu = trim(preg_replace('/\s+\|\s+/', ' | ', $updated_ghi_chu));
-            $updated_ghi_chu_escaped = mysqli_real_escape_string($conn, $updated_ghi_chu);
-            mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu_escaped' WHERE ID_DonHang = $order_id");
+            $update_statement = $conn->prepare('UPDATE donhang SET GhiChu = ? WHERE ID_DonHang = ?');
+            $update_statement->bind_param('si', $updated_ghi_chu, $order_id);
+            $update_statement->execute();
         }
     }
     
-    header('Location: Staff_Canceled_Orders.php?msg=' . ($status === 'returned' ? 'marked_returned' : 'marked_not_returned'));
+    header('Location: Staff_Canceled_Orders.php?msg=' . ($status === 'returned' ? 'marked_returned' : 'marked_not_returned'), true, 303);
     exit();
 }
+
+include("../Layouts/headHTML.php");
 ?>
 
 <body id="page-top">
@@ -158,16 +170,7 @@ if (isset($_GET['mark_returned']) && $_GET['mark_returned'] > 0) {
                                                         <i class="fas fa-eye"></i> Chi tiết
                                                     </a>
                                                     <?php if (!$returned_to_shop): ?>
-                                                        <a href="?mark_returned=<?php echo $row['ID_DonHang']; ?>&status=returned" 
-                                                           class="btn btn-sm btn-success mb-1"
-                                                           onclick="return confirm('Xác nhận shipper đã trả hàng về cửa hàng?');">
-                                                            <i class="fas fa-check-circle"></i> Đã hoàn về shop
-                                                        </a>
-                                                        <a href="?mark_returned=<?php echo $row['ID_DonHang']; ?>&status=not_returned" 
-                                                           class="btn btn-sm btn-warning"
-                                                           onclick="return confirm('Xác nhận hàng chưa được trả về cửa hàng?');">
-                                                            <i class="fas fa-times-circle"></i> Chưa hoàn về shop
-                                                        </a>
+                                                        <form method="post" class="d-inline" onsubmit="return confirm('Xác nhận shipper đã trả hàng về cửa hàng?');"><?php echo csrf_field(); ?><input type="hidden" name="mark_returned" value="<?php echo (int) $row['ID_DonHang']; ?>"><input type="hidden" name="status" value="returned"><button class="btn btn-sm btn-success mb-1" type="submit"><i class="fas fa-check-circle"></i> Đã hoàn về shop</button></form>
                                                     <?php else: ?>
                                                         <span class="badge bg-success">Đã hoàn về shop</span>
                                                         <!-- Don't show "Not Yet Returned" button when already returned -->

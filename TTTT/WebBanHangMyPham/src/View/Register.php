@@ -2,6 +2,7 @@
 include("../Layouts/Head.php");
 
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
 
 ?>
@@ -157,6 +158,7 @@ include("../DB_Connect.php");
                                         </div>
                                     </div>
                                 </div>
+                                <?php echo turnstile_widget('register'); ?>
                                 <button type="button" onclick="register()" class="btn btn-dark btn-lg btn-block px-3 mx-3">Đăng ký</button>
                             </div>
                         </div>
@@ -354,6 +356,7 @@ include("../DB_Connect.php");
                                 type: 'POST',
                                 url: '../Processing/Send_Verification_Code.php',
                                 data: {
+                                    csrf_token: <?php echo json_encode(csrf_token()); ?>,
                                     email: email
                                 },
                                 xhrFields: {
@@ -535,8 +538,9 @@ include("../DB_Connect.php");
                 }
 
                 //check sdt
-                var phoneRegex = /^(0|\+84)(9\d|8[1-9]|7[0-9]|5[6-9]|3[2-9]|2\d)\d{7}$/;
-                if (!phoneRegex.test(phone)) {
+                // Same rule as XuLy_DangKy.php: a Vietnamese mobile number.
+                var phoneRegex = /^(?:0|\+84|84)(?:3|5|7|8|9)\d{8}$/;
+                if (!phoneRegex.test(phone.replace(/[\s.\-()]/g, ''))) {
                     alert("Số điện thoại không hợp lệ!");
                     return;
                 }
@@ -613,6 +617,8 @@ include("../DB_Connect.php");
                 
                 // Prepare registration data
                 var regData = {
+                        csrf_token: <?php echo json_encode(csrf_token()); ?>,
+                        'cf-turnstile-response': (document.querySelector('[name="cf-turnstile-response"]') || {}).value || '',
                         HoVaTen: name,
                         Email: email,
                         Sdt: phone,
@@ -699,6 +705,12 @@ include("../DB_Connect.php");
                             alert('Mã xác nhận đã được sử dụng! Vui lòng gửi lại mã mới nếu cần.');
                         } else if (response == "missing_code") {
                             alert('Vui lòng nhập mã xác nhận từ email!');
+                        } else if (response == "weak_password") {
+                            alert('Mật khẩu phải có ít nhất 10 ký tự.');
+                        } else if (response == "invalid_upload") {
+                            alert('Ảnh CMND/CCCD phải gồm đúng 2 tệp JPEG/PNG, tối đa 5 MB mỗi tệp.');
+                        } else if (response == "invalid_staff_data") {
+                            alert('Thông tin hồ sơ ứng tuyển chưa đầy đủ.');
                         } else if (response == "error") {
                             alert('Đăng ký không thành công! Vui lòng thử lại');
                         } else if (response == "tontai") {
@@ -710,10 +722,33 @@ include("../DB_Connect.php");
                         }
                     },
                     error: function(xhr, status, error) {
+                        var knownErrors = {
+                            invalid_code: 'Mã xác nhận không đúng! Vui lòng kiểm tra lại mã từ email.',
+                            code_expired: 'Mã xác nhận đã hết hạn. Vui lòng gửi mã mới.',
+                            code_used: 'Mã xác nhận đã được sử dụng. Vui lòng gửi mã mới.',
+                            missing_code: 'Vui lòng nhập mã xác nhận từ email.',
+                            weak_password: 'Mật khẩu phải có ít nhất 10 ký tự.',
+                            invalid_upload: 'Ảnh CMND/CCCD phải gồm đúng 2 tệp JPEG/PNG, tối đa 5 MB mỗi tệp.',
+                            invalid_staff_data: 'Thông tin hồ sơ ứng tuyển chưa đầy đủ.',
+                            invalid_phone: 'Số điện thoại không hợp lệ. Vui lòng nhập số di động Việt Nam, ví dụ 0912345678.',
+                            invalid_address: 'Vui lòng chọn Tỉnh/Quận/Phường và nhập địa chỉ chi tiết.',
+                            turnstile_invalid: 'Xác minh chống bot không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.',
+                            tontai: 'Tên đăng nhập hoặc email đã tồn tại.'
+                        };
+                        var serverCode = (xhr.responseText || '').trim();
+                        if (knownErrors[serverCode]) {
+                            alert(knownErrors[serverCode]);
+                            return;
+                        }
                         console.error('AJAX Error:', status, error);
                         console.error('Response:', xhr.responseText);
                         console.error('Status Code:', xhr.status);
                         alert('Đã xảy ra lỗi khi gửi dữ liệu. Vui lòng kiểm tra console để biết thêm chi tiết.\n\nLỗi: ' + error + '\nStatus: ' + status);
+                    },
+                    complete: function() {
+                        if (window.turnstile) {
+                            window.turnstile.reset();
+                        }
                     }
                 });
             } catch (e) {

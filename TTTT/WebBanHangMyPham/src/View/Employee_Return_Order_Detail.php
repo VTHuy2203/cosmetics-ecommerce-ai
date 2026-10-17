@@ -4,24 +4,27 @@
  * Staff-only page for viewing return request details and approving/rejecting
  * SECURITY: This page does NOT include admin interfaces or navigation
  */
-include("../Layouts/Head.php");
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__, 3) . '/config/returns.php';
 
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-// Check if user is logged in and is an employee
-if (!isset($_SESSION['user']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'employee') {
+// Verify the current database role; session role values can become stale.
+$user_id = filter_var($_SESSION['IDNguoiDung'] ?? null, FILTER_VALIDATE_INT);
+$username = trim((string) ($_SESSION['user'] ?? ''));
+if (!$user_id || $username === '') {
     header("Location: Login.php");
     exit();
 }
 
 // Check if employee is approved
-$user_id = $_SESSION['IDNguoiDung'];
-$employee_check = mysqli_query($conn, "SELECT status FROM shipper_requests WHERE user_id = $user_id AND status = 'approved' ORDER BY created_at DESC LIMIT 1");
-if (!$employee_check || mysqli_num_rows($employee_check) == 0) {
+$employee_check = $conn->prepare(
+    "SELECT k.Role FROM khachhang k
+     WHERE k.ID_KhachHang = ? AND k.TenDangNhap = ? AND k.Role = 'employee'
+       AND EXISTS (SELECT 1 FROM shipper_requests s WHERE s.user_id = k.ID_KhachHang AND s.status = 'approved')"
+);
+$employee_check->bind_param('is', $user_id, $username);
+$employee_check->execute();
+if (!$employee_check->get_result()->fetch_assoc()) {
     echo "<script>alert('Tài khoản nhân viên của bạn chưa được phê duyệt. Vui lòng đợi Admin phê duyệt.'); window.location.href='index.php';</script>";
     exit();
 }
@@ -33,8 +36,25 @@ if ($request_id <= 0) {
     exit();
 }
 
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+    require_csrf();
+    $action = (string) ($_POST['action'] ?? '');
+    try {
+        process_return_request($conn, $request_id, $action, (int) $user_id, 'employee');
+        header('Location: Employee_Return_Orders.php?msg=' . ($action === 'approve' ? 'approved' : 'rejected'));
+        exit();
+    } catch (DomainException $error) {
+        http_response_code(409);
+        exit('Yêu cầu đã được xử lý hoặc dữ liệu hoàn tiền không hợp lệ.');
+    } catch (Throwable $error) {
+        error_log('Employee return processing failed: ' . $error->getMessage());
+        http_response_code(500);
+        exit('Không thể xử lý yêu cầu hoàn trả.');
+    }
+}
+
 // Get request details with product quantity
-$sql_request = "SELECT r.*, d.TongTien, d.TrangThai as OrderStatus, d.NgayTao as OrderDate, k.HoVaTen as CustomerName, k.ID_KhachHang, sp.TenSanPham, sp.GiaTien as ProductPrice, dct.SoLuong as ProductQuantity
+$sql_request = "SELECT r.*, d.TongTien, d.TrangThai as OrderStatus, d.NgayTao as OrderDate, k.HoVaTen as CustomerName, k.ID_KhachHang, sp.TenSanPham, dct.DonGia as ProductPrice, dct.SoLuong as ProductQuantity, dct.ThanhTienThucTra
                 FROM return_refund_requests r
                 LEFT JOIN donhang d ON r.ID_DonHang = d.ID_DonHang
                 LEFT JOIN khachhang k ON r.ID_KhachHang = k.ID_KhachHang
@@ -50,156 +70,7 @@ if (!$result_request || mysqli_num_rows($result_request) == 0) {
 
 $request = mysqli_fetch_array($result_request);
 
-// Handle approve/reject
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    ob_start(); // Start output buffering
-    
-    $action = isset($_POST['action']) ? $_POST['action'] : '';
-    
-    if ($action === 'approve') {
-        // Calculate refund amount based on the specific product being returned
-        $product_price = intval($request['ProductPrice'] ?? 0);
-        $product_quantity = intval($request['ProductQuantity'] ?? 0);
-        $refund_amount = $product_price * $product_quantity;
-        
-        // Update request status
-        mysqli_query($conn, "UPDATE return_refund_requests SET TrangThai = 'approved' WHERE ID_Request = $request_id");
-        
-        // Refund to customer account balance
-        $customer_id = intval($request['ID_KhachHang']);
-        
-        // Ensure SoDu column exists (check both SoDu and SoDuVi)
-        $check_col = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khachhang' AND (COLUMN_NAME = 'SoDu' OR COLUMN_NAME = 'SoDuVi')");
-        $has_balance_col = false;
-        $balance_col = 'SoDu';
-        if ($check_col) {
-            $col_row = mysqli_fetch_assoc($check_col);
-            if (intval($col_row['c']) > 0) {
-                $has_balance_col = true;
-                // Check which column exists
-                $check_so_du = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'khachhang' AND COLUMN_NAME = 'SoDu'");
-                if ($check_so_du) {
-                    $so_du_row = mysqli_fetch_assoc($check_so_du);
-                    if (intval($so_du_row['c']) > 0) {
-                        $balance_col = 'SoDu';
-                    } else {
-                        $balance_col = 'SoDuVi';
-                    }
-                }
-            }
-        }
-        
-        if (!$has_balance_col) {
-            @mysqli_query($conn, "ALTER TABLE `khachhang` ADD `SoDu` BIGINT NOT NULL DEFAULT 0 AFTER `DiaChi`");
-            $balance_col = 'SoDu';
-        }
-        
-        mysqli_query($conn, "UPDATE khachhang SET $balance_col = $balance_col + $refund_amount WHERE ID_KhachHang = $customer_id");
-        
-        // Update order note to mark as returned
-        $order_id = intval($request['ID_DonHang']);
-        $product_name = mysqli_real_escape_string($conn, $request['TenSanPham']);
-        $updated_ghi_chu = mysqli_real_escape_string($conn, $request['GhiChu'] ?? '');
-        if (stripos($updated_ghi_chu, '[ĐÃ HOÀN TRẢ]') === false) {
-            $updated_ghi_chu = ($updated_ghi_chu ? $updated_ghi_chu . ' ' : '') . '[ĐÃ HOÀN TRẢ] ' . $product_name;
-        }
-        mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu' WHERE ID_DonHang = $order_id");
-        
-        // Send notification to customer
-        $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-        if (file_exists($wsPushFile)) {
-            require_once($wsPushFile);
-            if (function_exists('websocket_push')) {
-                websocket_push(
-                    ['user_channel'],
-                    [
-                        'type' => 'return_refund_approved',
-                        'title' => 'Yêu cầu hoàn trả đã được duyệt',
-                        'message' => "Yêu cầu hoàn trả đơn hàng #{$request['ID_DonHang']} của bạn đã được duyệt. Số tiền {$refund_amount} đã được hoàn vào số dư tài khoản của bạn. Chúng tôi xin lỗi vì không đáp ứng được kỳ vọng của bạn.",
-                        'sound' => 'notification',
-                        'data' => [
-                            'request_id' => $request_id,
-                            'order_id' => $request['ID_DonHang'],
-                            'customer_id' => $customer_id,
-                            'refund_amount' => $refund_amount,
-                            'timestamp' => date('Y-m-d H:i:s')
-                        ]
-                    ]
-                );
-                // Notify Admin
-                websocket_push(
-                    ['admin_channel'],
-                    [
-                        'type' => 'return_refund_approved_staff',
-                        'title' => 'Yêu cầu hoàn trả đã được Staff duyệt',
-                        'message' => "Staff đã duyệt yêu cầu hoàn trả đơn hàng #{$request['ID_DonHang']} của khách hàng {$request['CustomerName']}. Số tiền hoàn: " . number_format($refund_amount, 0, ',', '.') . " đ",
-                        'sound' => 'notification',
-                        'data' => [
-                            'request_id' => $request_id,
-                            'order_id' => $request['ID_DonHang'],
-                            'customer_id' => $customer_id,
-                            'customer_name' => $request['CustomerName'],
-                            'refund_amount' => $refund_amount,
-                            'timestamp' => date('Y-m-d H:i:s')
-                        ]
-                    ]
-                );
-            }
-        }
-        
-        ob_end_clean();
-        header('Location: Employee_Return_Orders.php?msg=approved');
-        exit();
-        
-    } elseif ($action === 'reject') {
-        // Reject request
-        mysqli_query($conn, "UPDATE return_refund_requests SET TrangThai = 'rejected' WHERE ID_Request = $request_id");
-        
-        // Send notification to user
-        $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-        if (file_exists($wsPushFile)) {
-            require_once($wsPushFile);
-            if (function_exists('websocket_push')) {
-                websocket_push(
-                    ['user_channel'],
-                    [
-                        'type' => 'return_refund_rejected',
-                        'title' => 'Yêu cầu hoàn trả đã bị từ chối',
-                        'message' => "Yêu cầu hoàn trả đơn hàng #{$request['ID_DonHang']} của bạn đã bị từ chối. Vui lòng liên hệ với chúng tôi nếu bạn có thắc mắc.",
-                        'sound' => 'notification',
-                        'data' => [
-                            'request_id' => $request_id,
-                            'order_id' => $request['ID_DonHang'],
-                            'customer_id' => intval($request['ID_KhachHang']),
-                            'timestamp' => date('Y-m-d H:i:s')
-                        ]
-                    ]
-                );
-                // Notify Admin
-                websocket_push(
-                    ['admin_channel'],
-                    [
-                        'type' => 'return_refund_rejected_staff',
-                        'title' => 'Yêu cầu hoàn trả đã bị Staff từ chối',
-                        'message' => "Staff đã từ chối yêu cầu hoàn trả đơn hàng #{$request['ID_DonHang']} của khách hàng {$request['CustomerName']}.",
-                        'sound' => 'notification',
-                        'data' => [
-                            'request_id' => $request_id,
-                            'order_id' => $request['ID_DonHang'],
-                            'customer_id' => intval($request['ID_KhachHang']),
-                            'customer_name' => $request['CustomerName'],
-                            'timestamp' => date('Y-m-d H:i:s')
-                        ]
-                    ]
-                );
-            }
-        }
-        
-        ob_end_clean();
-        header('Location: Employee_Return_Orders.php?msg=rejected');
-        exit();
-    }
-}
+include("../Layouts/Head.php");
 
 // Parse attachments (JSON array of file paths)
 $attachments = [];
@@ -212,8 +83,8 @@ if (!empty($request['Attachments'])) {
 
 // Calculate refund amount
 $product_price = intval($request['ProductPrice'] ?? 0);
-$product_quantity = intval($request['ProductQuantity'] ?? 0);
-$refund_amount = $product_price * $product_quantity;
+$product_quantity = intval($request['SoLuongYeuCau'] ?? 0);
+$refund_amount = return_refund_preview_amount($request);
 ?>
 
 <!DOCTYPE html>
@@ -346,7 +217,7 @@ $refund_amount = $product_price * $product_quantity;
                                     
                                     if (empty($filename)) continue;
                                     
-                                    $file_path = '../../AdminManage/src/ReturnRefundAttachments/' . $filename;
+                                    $file_path = '../Processing/Return_Attachment.php?request_id=' . (int) $request_id . '&file=' . rawurlencode(basename($filename));
                                     $file_ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
                                     $is_video = in_array($file_ext, ['mp4', 'avi', 'mov', 'wmv', 'flv']);
                                     $is_image = in_array($file_ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']) || $attachment_type === 'image';
@@ -384,6 +255,7 @@ $refund_amount = $product_price * $product_quantity;
                         <?php if ($request['TrangThai'] == 'pending'): ?>
                         <div class="mt-4 border-top pt-4">
                             <form method="POST" onsubmit="return confirm('Bạn có chắc muốn thực hiện hành động này?');">
+                                <?php echo csrf_field(); ?>
                                 <input type="hidden" name="action" id="action_input">
                                 <div class="row">
                                     <div class="col-md-6 mb-2">

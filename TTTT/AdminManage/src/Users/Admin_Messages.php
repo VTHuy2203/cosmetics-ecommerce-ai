@@ -1,50 +1,24 @@
 <?php
 // Admin_Messages.php - Review and label customer messages
-include("../Layouts/headHTML.php");
-include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once '../DB_Connect.php';
+require_once '../Layouts/Admin_Access_Check.php';
 
 // Access control is handled by Admin_Access_Check.php (included via headHTML.php)
 // Just read admin session info for display purposes
 $is_admin = isset($_SESSION['admin_is_admin']) && $_SESSION['admin_is_admin'] === true;
 
-// Use PDO for chat tables (they use PDO, not mysqli)
-function pdo_connect_chat() {
-    $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-    return new PDO($dsn, "root", "", [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
-}
-
-$pdo = pdo_connect_chat();
-
-// Ensure schema
-$pdo->exec("
-    CREATE TABLE IF NOT EXISTS chat_message_labels(
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        message_id INT NOT NULL,
-        user_id INT NULL,
-        session_id VARCHAR(128) NOT NULL,
-        label ENUM('not_potential', 'needs_followup', 'potential') NOT NULL,
-        notes TEXT NULL,
-        labeled_by INT NULL,
-        labeled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_msg (message_id),
-        INDEX idx_user (user_id),
-        INDEX idx_session (session_id),
-        INDEX idx_label (label),
-        FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-");
+$pdo = app_pdo();
 
 // Handle label update
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'label') {
-    $message_id = (int)$_POST['message_id'];
-    $label = $_POST['label'];
-    $notes = $_POST['notes'] ?? '';
+    require_csrf();
+    $message_id = filter_var($_POST['message_id'] ?? null, FILTER_VALIDATE_INT);
+    $label = (string) ($_POST['label'] ?? '');
+    $notes = mb_substr(trim((string) ($_POST['notes'] ?? '')), 0, 1000);
     $admin_id = $_SESSION['admin_id'] ?? null;
     
-    if (in_array($label, ['not_potential', 'needs_followup', 'potential'])) {
+    if ($message_id !== false && $message_id > 0 && in_array($label, ['not_potential', 'needs_followup', 'potential'], true)) {
         $stmt = $pdo->prepare("SELECT user_id, session_id FROM chat_messages WHERE id = ?");
         $stmt->execute([$message_id]);
         $msg = $stmt->fetch();
@@ -62,9 +36,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $stmt->execute([$message_id, $msg['user_id'], $msg['session_id'], $label, $notes, $admin_id]);
         }
     }
-    header('Location: ' . $_SERVER['PHP_SELF']);
+    header('Location: ' . $_SERVER['PHP_SELF'], true, 303);
     exit;
 }
+
+include("../Layouts/headHTML.php");
 
 $filter_label = $_GET['label'] ?? '';
 
@@ -238,6 +214,7 @@ $stats = $pdo->query("
                         </td>
                         <td>
                           <form method="POST" class="form-inline">
+                            <?php echo csrf_field(); ?>
                             <input type="hidden" name="action" value="label">
                             <input type="hidden" name="message_id" value="<?php echo $msg['id']; ?>">
                             <select name="label" class="form-control form-control-sm mr-1" required>

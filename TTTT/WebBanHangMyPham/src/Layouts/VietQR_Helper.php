@@ -2,6 +2,13 @@
 // Simple VietQR helper to build QR image URLs for MB Bank via VietQR
 // Usage: getVietQRUrl($accountNo, $bankBin, $amountVnd, $description)
 
+function normalizeVietQRDescription($description)
+{
+	$desc = trim((string) $description);
+	$desc = preg_replace('/\s+/u', ' ', $desc) ?? '';
+	return function_exists('mb_substr') ? mb_substr($desc, 0, 120, 'UTF-8') : substr($desc, 0, 120);
+}
+
 function getVietQRUrl($accountNo, $bankBin, $amountVnd, $description)
 {
 	$base = 'https://img.vietqr.io/image';
@@ -12,10 +19,7 @@ function getVietQRUrl($accountNo, $bankBin, $amountVnd, $description)
 		$amount = 0;
 	}
 
-	$desc = trim($description);
-	// VietQR recommends no special characters; sanitize lightly
-	$desc = preg_replace('/\s+/', ' ', $desc);
-	$desc = substr($desc, 0, 120);
+	$desc = normalizeVietQRDescription($description);
 
 	$query = http_build_query([
 		'amount' => $amount,

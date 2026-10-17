@@ -16,22 +16,21 @@ if ($user_role !== 'shipper') {
     exit();
 }
 
-// Ensure ID_Shipper column exists (check first to avoid duplicate column error)
-$check_col = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'donhang' AND COLUMN_NAME = 'ID_Shipper'");
-$col_exists = false;
-if ($check_col) {
-    $col_row = mysqli_fetch_assoc($check_col);
-    $col_exists = intval($col_row['c']) > 0;
-}
-if (!$col_exists) {
-    @mysqli_query($conn, "ALTER TABLE `donhang` ADD `ID_Shipper` INT NULL AFTER `DaThanhToan`");
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+    require_csrf();
 }
 
 // Handle order acceptance
-if (isset($_GET['accept_order']) && $_GET['accept_order'] > 0) {
-    $order_id = intval($_GET['accept_order']);
+if (($_POST['action'] ?? '') === 'accept_order') {
+    $order_id = (int) ($_POST['order_id'] ?? 0);
     // Update order: set status to 2 (Preparing) and assign shipper
-    $result = mysqli_query($conn, "UPDATE donhang SET TrangThai = 2, ID_Shipper = $user_id WHERE ID_DonHang = $order_id AND TrangThai = 1");
+    $accept = $conn->prepare(
+        'UPDATE donhang SET TrangThai = 2, ID_Shipper = ?
+         WHERE ID_DonHang = ? AND TrangThai = 1 AND (ID_Shipper IS NULL OR ID_Shipper = 0)'
+    );
+    $accept->bind_param('ii', $user_id, $order_id);
+    $accept->execute();
+    $result = $accept->affected_rows === 1;
     
     if ($result) {
         // Get shipper name
@@ -121,12 +120,23 @@ if (isset($_GET['accept_order']) && $_GET['accept_order'] > 0) {
 }
 
 // Handle delivery confirmation
-if (isset($_GET['confirm_delivery']) && $_GET['confirm_delivery'] > 0) {
-    $order_id = intval($_GET['confirm_delivery']);
+if (($_POST['action'] ?? '') === 'confirm_delivery') {
+    $order_id = (int) ($_POST['order_id'] ?? 0);
     // Update order: set status to 3 (Delivered) and DaThanhToan = 1 (Paid)
     // When shipper confirms successful delivery, order is automatically marked as paid
     // NOTE: Stock is NOT reduced here - it was already reduced when admin approved the order
-    $result_update = mysqli_query($conn, "UPDATE donhang SET TrangThai = 3, DaThanhToan = 1 WHERE ID_DonHang = $order_id AND ID_Shipper = $user_id AND TrangThai = 2");
+    $delivery = $conn->prepare(
+        "UPDATE donhang SET TrangThai = 3, GiaoHangLuc = NOW(),
+         DaThanhToan = IF(PhuongThucThanhToan = 'cod', 1, DaThanhToan),
+         TrangThaiThanhToan = IF(PhuongThucThanhToan = 'cod', 'paid', TrangThaiThanhToan),
+         ThanhToanLuc = IF(PhuongThucThanhToan = 'cod', NOW(), ThanhToanLuc),
+         MaThamChieuThanhToan = IF(PhuongThucThanhToan = 'cod', CONCAT('COD-', ID_DonHang, '-', UNIX_TIMESTAMP()), MaThamChieuThanhToan)
+         WHERE ID_DonHang = ? AND ID_Shipper = ? AND TrangThai = 2
+         AND (PhuongThucThanhToan = 'cod' OR TrangThaiThanhToan = 'paid')"
+    );
+    $delivery->bind_param('ii', $order_id, $user_id);
+    $delivery->execute();
+    $result_update = $delivery->affected_rows === 1;
     
     if ($result_update) {
         // Get shipper name
@@ -216,7 +226,7 @@ if (isset($_GET['confirm_delivery']) && $_GET['confirm_delivery'] > 0) {
 }
 
 // Handle customer refusal/rejection
-if (isset($_POST['customer_refused']) && isset($_POST['order_id']) && isset($_POST['refusal_reason'])) {
+if (($_POST['action'] ?? '') === 'customer_refused' && isset($_POST['order_id'], $_POST['refusal_reason'])) {
     $order_id = intval($_POST['order_id']);
     $refusal_reason = mysqli_real_escape_string($conn, trim($_POST['refusal_reason']));
     
@@ -236,10 +246,9 @@ if (isset($_POST['customer_refused']) && isset($_POST['order_id']) && isset($_PO
     
     $updated_ghi_chu = $current_ghi_chu . ' | [KHÁCH HÀNG TỪ CHỐI] Lý do: ' . $refusal_reason;
     
-    // CRITICAL: Update order status to "Canceled" (-1) when shipper reports customer refusal
-    // This removes "Out for Delivery" status in Admin interface
+    // Keep the order assigned/in transit until the physical goods are returned.
     $updated_ghi_chu_escaped = mysqli_real_escape_string($conn, $updated_ghi_chu);
-    $result_update = mysqli_query($conn, "UPDATE donhang SET TrangThai = -1, GhiChu = '$updated_ghi_chu_escaped' WHERE ID_DonHang = $order_id AND ID_Shipper = $user_id AND TrangThai = 2");
+    $result_update = mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu_escaped' WHERE ID_DonHang = $order_id AND ID_Shipper = $user_id AND TrangThai = 2");
     
     if ($result_update) {
         // Get order info for notifications
@@ -285,20 +294,68 @@ if (isset($_POST['customer_refused']) && isset($_POST['order_id']) && isset($_PO
 }
 
 // Handle shipper returned goods to shop
-if (isset($_GET['returned_to_shop']) && $_GET['returned_to_shop'] > 0) {
-    $order_id = intval($_GET['returned_to_shop']);
+if (($_POST['action'] ?? '') === 'returned_to_shop') {
+    $order_id = (int) ($_POST['order_id'] ?? 0);
     
-    // Update order GhiChu to mark goods as returned
-    $current_ghi_chu = '';
-    $order_info = mysqli_fetch_array(mysqli_query($conn, "SELECT GhiChu FROM donhang WHERE ID_DonHang = $order_id AND ID_Shipper = $user_id"));
-    if ($order_info) {
-        $current_ghi_chu = $order_info['GhiChu'] ?? '';
-    }
-    
-    // Check if already marked as returned
-    if (stripos($current_ghi_chu, '[ĐÃ TRẢ VỀ CỬA HÀNG]') === false) {
-        $updated_ghi_chu = $current_ghi_chu . ' | [ĐÃ TRẢ VỀ CỬA HÀNG]';
-        mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu' WHERE ID_DonHang = $order_id AND ID_Shipper = $user_id");
+    $conn->begin_transaction();
+    try {
+        $orderLock = $conn->prepare(
+            'SELECT ID_KhachHang, TongTien, GhiChu, DaThanhToan, TonKhoDaGiu
+             FROM donhang WHERE ID_DonHang = ? AND ID_Shipper = ? AND TrangThai = 2 FOR UPDATE'
+        );
+        $orderLock->bind_param('ii', $order_id, $user_id);
+        $orderLock->execute();
+        $order_info = $orderLock->get_result()->fetch_assoc();
+        if (!$order_info
+            || stripos((string) $order_info['GhiChu'], '[KHÁCH HÀNG TỪ CHỐI]') === false
+            || stripos((string) $order_info['GhiChu'], '[ĐÃ TRẢ VỀ CỬA HÀNG]') !== false) {
+            throw new RuntimeException('Trạng thái hoàn hàng không hợp lệ.');
+        }
+
+        if ((int) $order_info['TonKhoDaGiu'] === 1) {
+            $details = $conn->prepare('SELECT ID_SanPham, SoLuong FROM donhangchitiet WHERE ID_DonHang = ?');
+            $details->bind_param('i', $order_id);
+            $details->execute();
+            $detailRows = $details->get_result();
+            $restore = $conn->prepare('UPDATE sanpham SET SoLuong = SoLuong + ? WHERE IDSanPham = ?');
+            while ($detail = $detailRows->fetch_assoc()) {
+                $quantity = (int) $detail['SoLuong'];
+                $productId = (int) $detail['ID_SanPham'];
+                $restore->bind_param('ii', $quantity, $productId);
+                $restore->execute();
+            }
+        }
+
+        $paymentStatus = (int) $order_info['DaThanhToan'] === 1 ? 'refunded' : 'failed';
+        if ((int) $order_info['DaThanhToan'] === 1) {
+            $refund = $conn->prepare('UPDATE khachhang SET SoDu = SoDu + ? WHERE ID_KhachHang = ?');
+            $refundAmount = (int) $order_info['TongTien'];
+            $customerId = (int) $order_info['ID_KhachHang'];
+            $refund->bind_param('ii', $refundAmount, $customerId);
+            $refund->execute();
+        }
+
+        $updated_ghi_chu = (string) $order_info['GhiChu'] . ' | [ĐÃ TRẢ VỀ CỬA HÀNG]';
+        $finishReturn = $conn->prepare(
+            'UPDATE donhang SET TrangThai = -1, GhiChu = ?, TonKhoDaGiu = 0,
+             DaThanhToan = 0, TrangThaiThanhToan = ? WHERE ID_DonHang = ?'
+        );
+        $finishReturn->bind_param('ssi', $updated_ghi_chu, $paymentStatus, $order_id);
+        $finishReturn->execute();
+
+        $payload = json_encode([
+            'order_id' => $order_id,
+            'shipper_id' => $user_id,
+            'refund_to_balance' => (int) $order_info['DaThanhToan'] === 1,
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $event = $conn->prepare(
+            "INSERT INTO outbox_events(event_type, aggregate_type, aggregate_id, payload)
+             VALUES ('order.returned_to_shop', 'order', ?, ?)"
+        );
+        $aggregateId = (string) $order_id;
+        $event->bind_param('ss', $aggregateId, $payload);
+        $event->execute();
+        $conn->commit();
         
         // Send notification to Admin and Staff
         $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
@@ -326,6 +383,11 @@ if (isset($_GET['returned_to_shop']) && $_GET['returned_to_shop'] > 0) {
                 );
             }
         }
+    } catch (Throwable $error) {
+        $conn->rollback();
+        error_log('Return-to-shop failed: ' . $error->getMessage());
+        header('Location: Shipper_Orders.php?msg=return_error');
+        exit();
     }
     
     header('Location: Shipper_Orders.php?msg=returned_to_shop');
@@ -346,19 +408,10 @@ $sql_available = "SELECT d.*, k.HoVaTen, k.SDT, k.DiaChi
 $result_available = mysqli_query($conn, $sql_available);
 
 // Handle payment confirmation by shipper
-if (isset($_GET['confirm_payment']) && $_GET['confirm_payment'] > 0) {
-    $order_id = intval($_GET['confirm_payment']);
-    
-    // Ensure DaThanhToan column exists
-    $check_paid_col = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'donhang' AND COLUMN_NAME = 'DaThanhToan'");
-    $paid_col_exists = false;
-    if ($check_paid_col) {
-        $paid_col_row = mysqli_fetch_assoc($check_paid_col);
-        $paid_col_exists = intval($paid_col_row['c']) > 0;
-    }
-    if (!$paid_col_exists) {
-        @mysqli_query($conn, "ALTER TABLE `donhang` ADD `DaThanhToan` TINYINT(1) NOT NULL DEFAULT 0 AFTER `TrangThai`");
-    }
+if (($_POST['action'] ?? '') === 'confirm_payment') {
+    http_response_code(410);
+    exit('Xác nhận thanh toán tách rời đã bị vô hiệu hóa. Hãy dùng luồng giao COD hoặc đối soát SePay.');
+    $order_id = (int) ($_POST['order_id'] ?? 0);
     
     // Update payment status - only if order is assigned to this shipper
     $result = mysqli_query($conn, "UPDATE donhang SET DaThanhToan = 1 WHERE ID_DonHang = $order_id AND ID_Shipper = $user_id");
@@ -430,17 +483,6 @@ if (isset($_GET['confirm_payment']) && $_GET['confirm_payment'] > 0) {
 
 // Get my assigned orders (status = 2, assigned to me)
 // Order: oldest at top, newest at bottom (ASC - ascending order)
-// Ensure DaThanhToan column exists
-$check_paid_col = mysqli_query($conn, "SELECT COUNT(*) AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'donhang' AND COLUMN_NAME = 'DaThanhToan'");
-$paid_col_exists = false;
-if ($check_paid_col) {
-    $paid_col_row = mysqli_fetch_assoc($check_paid_col);
-    $paid_col_exists = intval($paid_col_row['c']) > 0;
-}
-if (!$paid_col_exists) {
-    @mysqli_query($conn, "ALTER TABLE `donhang` ADD `DaThanhToan` TINYINT(1) NOT NULL DEFAULT 0 AFTER `TrangThai`");
-}
-
 // Get my assigned orders: 
 // - Status 2 (delivering) OR 
 // - Status 3 (delivered) but NOT paid yet (DaThanhToan = 0)
@@ -519,11 +561,12 @@ $result_my_orders = mysqli_query($conn, $sql_my_orders);
                                             <td><strong><?php echo number_format($row['TongTien'], 0, ',', '.'); ?> đ</strong></td>
                                             <td><?php echo isset($row['NgayTao']) ? date('d/m/Y H:i', strtotime($row['NgayTao'])) : 'N/A'; ?></td>
                                             <td>
-                                                <a href="?accept_order=<?php echo $row['ID_DonHang']; ?>" 
-                                                   class="btn btn-sm btn-success" 
-                                                   onclick="return confirm('Bạn có chắc muốn nhận đơn hàng #<?php echo $row['ID_DonHang']; ?>?');">
-                                                    <i class="fas fa-check"></i> Nhận đơn
-                                                </a>
+                                                <form method="post" onsubmit="return confirm('Bạn có chắc muốn nhận đơn hàng #<?php echo $row['ID_DonHang']; ?>?');">
+                                                    <?php echo csrf_field(); ?>
+                                                    <input type="hidden" name="action" value="accept_order">
+                                                    <input type="hidden" name="order_id" value="<?php echo (int) $row['ID_DonHang']; ?>">
+                                                    <button type="submit" class="btn btn-sm btn-success"><i class="fas fa-check"></i> Nhận đơn</button>
+                                                </form>
                                             </td>
                                         </tr>
                                     <?php 
@@ -621,21 +664,23 @@ $result_my_orders = mysqli_query($conn, $sql_my_orders);
                                                             ?>
                                                             </small>
                                                         </div>
-                                                        <a href="?returned_to_shop=<?php echo $row['ID_DonHang']; ?>" 
-                                                           class="btn btn-sm btn-warning btn-block"
-                                                           onclick="return confirm('Xác nhận đã trả hàng về cửa hàng?');">
-                                                            <i class="fas fa-store me-1"></i> Đã trả hàng về cửa hàng
-                                                        </a>
+                                                        <form method="post" onsubmit="return confirm('Xác nhận đã trả hàng về cửa hàng?');">
+                                                            <?php echo csrf_field(); ?>
+                                                            <input type="hidden" name="action" value="returned_to_shop">
+                                                            <input type="hidden" name="order_id" value="<?php echo (int) $row['ID_DonHang']; ?>">
+                                                            <button type="submit" class="btn btn-sm btn-warning btn-block"><i class="fas fa-store me-1"></i> Đã trả hàng về cửa hàng</button>
+                                                        </form>
                                                 <?php 
                                                     else:
                                                         // Normal delivery buttons
                                                 ?>
                                                         <div class="btn-group-vertical" role="group">
-                                                            <a href="?confirm_delivery=<?php echo $row['ID_DonHang']; ?>" 
-                                                               class="btn btn-sm btn-success mb-1" 
-                                                               onclick="return confirm('Xác nhận đã giao hàng thành công cho đơn hàng #<?php echo $row['ID_DonHang']; ?>?');">
-                                                                <i class="fas fa-check-circle"></i> Giao hàng thành công
-                                                            </a>
+                                                            <form method="post" onsubmit="return confirm('Xác nhận đã giao hàng thành công cho đơn hàng #<?php echo $row['ID_DonHang']; ?>?');">
+                                                                <?php echo csrf_field(); ?>
+                                                                <input type="hidden" name="action" value="confirm_delivery">
+                                                                <input type="hidden" name="order_id" value="<?php echo (int) $row['ID_DonHang']; ?>">
+                                                                <button type="submit" class="btn btn-sm btn-success mb-1"><i class="fas fa-check-circle"></i> Giao hàng thành công</button>
+                                                            </form>
                                                             <button type="button" 
                                                                     class="btn btn-sm btn-danger" 
                                                                     onclick="openCustomerRefusalModal(<?php echo $row['ID_DonHang']; ?>)">
@@ -683,7 +728,8 @@ $result_my_orders = mysqli_query($conn, $sql_my_orders);
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <form id="customerRefusalForm" method="POST" action="">
-                    <input type="hidden" name="customer_refused" value="1">
+                    <?php echo csrf_field(); ?>
+                    <input type="hidden" name="action" value="customer_refused">
                     <input type="hidden" name="order_id" id="refusalOrderId" value="">
                     <div class="modal-body">
                         <div class="alert alert-warning">

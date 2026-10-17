@@ -1,7 +1,7 @@
 <?php
-session_start();
 include("../Layouts/headHTML.php");
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/uploads.php';
 
 if (
     $_SERVER['REQUEST_METHOD'] === 'POST'
@@ -9,29 +9,29 @@ if (
     && isset($_POST['baiViet'])
     && isset($_FILES['image'])
 ) {
-    $tieuDeBaiViet = $_POST['tieuDeBaiViet'];
-    $baiViet = $_POST['baiViet'];
+    require_csrf();
+    $tieuDeBaiViet = trim((string) $_POST['tieuDeBaiViet']);
+    $baiViet = (string) $_POST['baiViet'];
+    if ($tieuDeBaiViet === '' || mb_strlen($tieuDeBaiViet) > 500 || mb_strlen($baiViet) > 100000) {
+        http_response_code(422); exit('Nội dung bài viết không hợp lệ.');
+    }
 
     $checkIssetIMG = false;
     //check file có phải là ảnh không
-    $check = getimagesize($_FILES["image"]["tmp_name"]);
-    if ($check !== false) {
+    try {
         $checkIssetIMG = true;
-
-        $target_dir = "IMG_News_Posts/";
-        $target_file = $target_dir . basename($_FILES["image"]["name"]);
-
-        move_uploaded_file($_FILES["image"]["tmp_name"], $target_file);
+        $target_file = 'IMG_News_Posts/' . store_public_image_upload($_FILES['image'], __DIR__ . '/IMG_News_Posts');
+    } catch (Throwable $error) {
+        $checkIssetIMG = false;
     }
 
     if ($checkIssetIMG == false) {
         $target_file = "";
     }
 
-    $sql = "INSERT INTO `tintucbaiviet` (`ID_TinTucBaiViet`, `TieuDeBaiViet`, `BaiViet`, `AnhBaiViet`) 
-            VALUES (null, '$tieuDeBaiViet', '$baiViet', '$target_file')";
-
-    $result = mysqli_query($conn, $sql);
+    $statement = $conn->prepare('INSERT INTO tintucbaiviet (TieuDeBaiViet, BaiViet, AnhBaiViet) VALUES (?, ?, ?)');
+    $statement->bind_param('sss', $tieuDeBaiViet, $baiViet, $target_file);
+    $result = $statement->execute();
 
     if ($result) {
         $news_id = mysqli_insert_id($conn);
@@ -81,6 +81,7 @@ if (
                     <!-- DataTales Example -->
                     <div class="container-fluid shadow mb-4">
                         <form action="" method="post" enctype="multipart/form-data">
+                            <?php echo csrf_field(); ?>
                             <div class="row">
                                 <?php if (isset($_SESSION['success_message'])) : ?>
                                 <div class="alert alert-success m-4"><?php echo $_SESSION['success_message']; ?></div>
@@ -103,7 +104,7 @@ if (
                                     ClassicEditor
                                         .create(document.querySelector('#baiViet'), {
                                             ckfinder: {
-                                                uploadUrl: 'File_Upload.php'
+                                                uploadUrl: 'File_Upload.php?csrf_token=<?php echo rawurlencode(csrf_token()); ?>'
                                             }
                                         })
                                         .then(editor => {

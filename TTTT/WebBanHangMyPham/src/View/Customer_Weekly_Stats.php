@@ -3,31 +3,19 @@
  * Customer Weekly Statistics View
  * Shows weekly customer evaluation with purchase amounts and labels
  */
-session_start();
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
-// Check if user is admin or employee
-if (!isset($_SESSION['ID_KhachHang']) || !in_array($_SESSION['Role'] ?? '', ['admin', 'employee'])) {
-    header('Location: Login.php');
+$role = (string) ($_SESSION['admin_role'] ?? $_SESSION['user_role'] ?? '');
+$hasBackOfficeSession = isset($_SESSION['admin_id'])
+    || (isset($_SESSION['IDNguoiDung'], $_SESSION['user']) && $role === 'employee');
+if (!$hasBackOfficeSession || !in_array($role, ['admin', 'manager', 'employee'], true)) {
+    header('Location: ' . (isset($_SESSION['admin_role'])
+        ? '/TTTT/AdminManage/src/View/Admin_Login.php'
+        : 'Login.php'));
     exit;
 }
 
-$DEFAULTS = [
-    "DB_HOST"    => "127.0.0.1",
-    "DB_NAME"    => "webmipham1",
-    "DB_USER"    => "root",
-    "DB_PASS"    => "",
-    "DB_CHARSET" => "utf8mb4",
-];
-
-function pdo_connect($cfg) {
-    $dsn = "mysql:host={$cfg['DB_HOST']};dbname={$cfg['DB_NAME']};charset={$cfg['DB_CHARSET']}";
-    return new PDO($dsn, $cfg['DB_USER'], $cfg['DB_PASS'], [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-    ]);
-}
-
-$pdo = pdo_connect($DEFAULTS);
+$pdo = app_pdo();
 
 // Get filter parameters
 $weekFilter = $_GET['week'] ?? date('Y-m-d', strtotime('monday this week'));
@@ -36,11 +24,12 @@ $labelFilter = $_GET['label'] ?? '';
 // Build query
 $sql = "SELECT 
     cws.*, 
-    k.HoVaTen, k.Email, k.SoDienThoai,
+    k.HoVaTen, k.Email, k.SDT,
     CASE 
         WHEN cws.customer_label = 'potential' THEN '⭐ Tiềm năng'
         WHEN cws.customer_label = 'follow-up' THEN '📋 Theo dõi'
-        ELSE '❌ Spam'
+        WHEN cws.customer_label = 'normal' THEN 'Bình thường'
+        ELSE 'Spam'
     END as label_display
 FROM customer_weekly_stats cws
 JOIN khachhang k ON cws.user_id = k.ID_KhachHang
@@ -84,11 +73,13 @@ $availableWeeks = $weeksStmt->fetchAll(PDO::FETCH_COLUMN);
     <style>
         .label-potential { background: linear-gradient(135deg, #ffd700 0%, #ffb347 100%); color: #333; }
         .label-follow-up { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; }
+        .label-normal { background: #6c757d; color: #fff; }
         .label-spam { background: #dc3545; color: #fff; }
         .star-icon { color: #ffd700; font-size: 1.2em; }
         .summary-card { border-radius: 12px; padding: 20px; margin-bottom: 20px; }
         .summary-potential { background: linear-gradient(135deg, #fff9e6 0%, #fff3cd 100%); border: 2px solid #ffd700; }
         .summary-follow-up { background: linear-gradient(135deg, #e8e4f8 0%, #d4c8f0 100%); border: 2px solid #764ba2; }
+        .summary-normal { background: #f1f3f5; border: 2px solid #6c757d; }
         .summary-spam { background: #f8d7da; border: 2px solid #dc3545; }
     </style>
 </head>
@@ -112,6 +103,7 @@ $availableWeeks = $weeksStmt->fetchAll(PDO::FETCH_COLUMN);
             <label class="form-label">Phân loại:</label>
             <select class="form-select" id="labelFilter" onchange="applyFilters()">
                 <option value="">Tất cả</option>
+                <option value="normal" <?= $labelFilter === 'normal' ? 'selected' : '' ?>>Bình thường</option>
                 <option value="potential" <?= $labelFilter === 'potential' ? 'selected' : '' ?>>⭐ Tiềm năng</option>
                 <option value="follow-up" <?= $labelFilter === 'follow-up' ? 'selected' : '' ?>>📋 Theo dõi</option>
                 <option value="spam" <?= $labelFilter === 'spam' ? 'selected' : '' ?>>❌ Spam</option>
@@ -126,13 +118,14 @@ $availableWeeks = $weeksStmt->fetchAll(PDO::FETCH_COLUMN);
     <div class="row mb-4">
         <?php 
         $summaryMap = array_column($summary, null, 'customer_label');
-        $labels = ['potential' => ['⭐ Tiềm năng', 'summary-potential'], 
+        $labels = ['normal' => ['Bình thường', 'summary-normal'],
+                   'potential' => ['⭐ Tiềm năng', 'summary-potential'], 
                    'follow-up' => ['📋 Theo dõi', 'summary-follow-up'], 
                    'spam' => ['❌ Spam', 'summary-spam']];
         foreach ($labels as $key => $info): 
             $data = $summaryMap[$key] ?? ['count' => 0, 'total_revenue' => 0];
         ?>
-        <div class="col-md-4">
+        <div class="col-md-3">
             <div class="summary-card <?= $info[1] ?>">
                 <h5><?= $info[0] ?></h5>
                 <div class="d-flex justify-content-between">
@@ -156,7 +149,6 @@ $availableWeeks = $weeksStmt->fetchAll(PDO::FETCH_COLUMN);
                     <th>Đặt lịch</th>
                     <th>Chat</th>
                     <th>Phân loại</th>
-                    <th>Giảm giá</th>
                 </tr>
             </thead>
             <tbody>
@@ -170,14 +162,13 @@ $availableWeeks = $weeksStmt->fetchAll(PDO::FETCH_COLUMN);
                     </td>
                     <td>
                         <small><?= htmlspecialchars($row['Email']) ?></small><br>
-                        <small><?= htmlspecialchars($row['SoDienThoai']) ?></small>
+                        <small><?= htmlspecialchars($row['SDT']) ?></small>
                     </td>
                     <td><?= $row['total_orders'] ?></td>
                     <td><strong><?= number_format($row['total_amount'], 0, ',', '.') ?> VND</strong></td>
                     <td><?= $row['has_booking'] ? '✅' : '❌' ?></td>
                     <td><?= $row['has_chat'] ? '✅' : '❌' ?></td>
                     <td><span class="badge label-<?= $row['customer_label'] ?>"><?= $row['label_display'] ?></span></td>
-                    <td><?= $row['discount_percent'] ?>%</td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>
@@ -194,7 +185,14 @@ function applyFilters() {
 
 function runEvaluation() {
     if (confirm('Chạy đánh giá khách hàng tuần này?')) {
-        fetch('../Processing/Customer_Weekly_Evaluation.php')
+        fetch('../Processing/Customer_Weekly_Evaluation.php', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Accept': 'application/json',
+                'X-CSRF-Token': <?php echo json_encode(csrf_token()); ?>
+            }
+        })
             .then(r => r.json())
             .then(data => {
                 if (data.ok) {
@@ -209,4 +207,3 @@ function runEvaluation() {
 </script>
 </body>
 </html>
-

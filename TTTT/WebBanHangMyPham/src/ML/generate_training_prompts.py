@@ -134,15 +134,20 @@ def generate_training_prompts(products):
 def read_products_from_db():
     """Read products directly from MySQL database."""
     import os
-    from dotenv import load_dotenv
     import mysql.connector
-    
-    load_dotenv()
-    DB_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+    from env_loader import load_project_env
+
+    load_project_env(__file__)
+    def required(name):
+        value = os.environ.get(name)
+        if not value:
+            raise RuntimeError(f"Missing required database environment: {name}")
+        return value
+    DB_HOST = required("MYSQL_HOST")
     DB_PORT = int(os.getenv("MYSQL_PORT", "3306"))
-    DB_USER = os.getenv("MYSQL_USER", "root")
+    DB_USER = required("MYSQL_USER")
     DB_PASS = os.getenv("MYSQL_PASSWORD", "")
-    DB_NAME = os.getenv("MYSQL_DB", "webmipham1")
+    DB_NAME = required("MYSQL_DB")
     DB_CHARSET = os.getenv("MYSQL_CHARSET", "utf8mb4")
     
     conn = mysql.connector.connect(
@@ -166,7 +171,7 @@ def read_products_from_db():
                        sp.MoTaChiTiet,
                        dm.TenDanhMuc AS DanhMuc,
                        th.TenThuongHieu AS ThuongHieu,
-                       COALESCE(sp.Gia, sp.GiaTien) AS GiaTien
+                       sp.GiaTien AS GiaTien
                 FROM sanpham sp
                 LEFT JOIN danhmuc dm ON sp.IDDanhMuc = dm.IDDanhMuc
                 LEFT JOIN thuonghieu th ON sp.IDThuongHieu = th.IDThuongHieu
@@ -179,7 +184,7 @@ def read_products_from_db():
                        sp.MoTaChiTiet,
                        sp.IDDanhMuc AS DanhMuc,
                        sp.IDThuongHieu AS ThuongHieu,
-                       COALESCE(sp.Gia, sp.GiaTien) AS GiaTien
+                       sp.GiaTien AS GiaTien
                 FROM sanpham sp
                 ORDER BY sp.IDSanPham DESC
             """

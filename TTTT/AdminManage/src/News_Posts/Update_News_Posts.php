@@ -50,6 +50,7 @@ if (!$row) {
                     <!-- DataTales Example -->
                     <div class="card shadow mb-4">
                         <form method="post" action="Processing_Update_News_Posts.php" enctype="multipart/form-data">
+                            <?php echo csrf_field(); ?>
                             <div class="row">
                                 <div class="col-md-8">
                                     <div class="m-3 form-group">
@@ -67,7 +68,7 @@ if (!$row) {
                                         ClassicEditor
                                             .create(document.querySelector('#baiViet'), {
                                                 ckfinder: {
-                                                    uploadUrl: 'File_Upload.php'
+                                                    uploadUrl: 'File_Upload.php?csrf_token=<?php echo rawurlencode(csrf_token()); ?>'
                                                 }
                                             })
                                             .then(editor => {

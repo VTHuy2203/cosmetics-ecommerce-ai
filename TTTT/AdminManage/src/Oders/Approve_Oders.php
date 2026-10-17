@@ -20,7 +20,8 @@ if (!$result) {
 }
 
 //duyệt đơn hàng
-if (isset($_GET['oder_id']) && isset($_GET['approve'])) {
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && ($_POST['action'] ?? '') === 'approve') {
+    require_csrf();
     // CRITICAL: Use ONLY admin session variables (completely ignore UI session)
     // Staff access is determined by admin_role via Admin_Login.php
     $admin_role = $_SESSION['admin_role'] ?? null;
@@ -32,10 +33,19 @@ if (isset($_GET['oder_id']) && isset($_GET['approve'])) {
         header('Location: Approve_Oders.php?error=unauthorized');
         exit();
     }
-    $oder_id = $_GET['oder_id'];
-    $sql_update_trangthai = "UPDATE `donhang` SET `TrangThai` = '1' WHERE `donhang`.`ID_DonHang` = '$oder_id';";
-
-    $result_update_trangthai = mysqli_query($conn, $sql_update_trangthai);
+    $oder_id = (int) ($_POST['order_id'] ?? 0);
+    $transition = $conn->prepare(
+        "UPDATE donhang SET TrangThai = 1
+         WHERE ID_DonHang = ? AND TrangThai = 0
+         AND (PhuongThucThanhToan = 'cod' OR TrangThaiThanhToan = 'paid')"
+    );
+    $transition->bind_param('i', $oder_id);
+    $transition->execute();
+    $result_update_trangthai = $transition->affected_rows === 1;
+    if (!$result_update_trangthai) {
+        header('Location: Approve_Oders.php?error=invalid_state');
+        exit();
+    }
     
     // Log approval attempt for debugging
     error_log("Approve_Oders.php: Processing approval for order #{$oder_id}");
@@ -43,7 +53,10 @@ if (isset($_GET['oder_id']) && isset($_GET['approve'])) {
     
     // CRITICAL: Get order info FIRST, before any database operations that might fail
     // This ensures we have the data needed for notifications even if other operations fail
-    $order_info = mysqli_fetch_array(mysqli_query($conn, "SELECT ID_KhachHang, HoVaTen FROM donhang WHERE ID_DonHang = '$oder_id'"));
+    $orderStatement = $conn->prepare('SELECT ID_KhachHang, HoVaTen FROM donhang WHERE ID_DonHang = ?');
+    $orderStatement->bind_param('i', $oder_id);
+    $orderStatement->execute();
+    $order_info = $orderStatement->get_result()->fetch_assoc();
     $customer_name = $order_info['HoVaTen'] ?? 'Khách hàng';
     $customer_id = $order_info['ID_KhachHang'] ?? null;
     
@@ -57,18 +70,7 @@ if (isset($_GET['oder_id']) && isset($_GET['approve'])) {
     $is_staff = ($admin_role === 'employee');
     $approver_name = $is_staff ? $staff_name : 'Admin';
     
-    // Reduce product quantity when order is approved
-    if ($result_update_trangthai) {
-        // Get order details
-        $order_details = mysqli_query($conn, "SELECT ID_SanPham, SoLuong FROM donhangchitiet WHERE ID_DonHang = '$oder_id'");
-        while ($detail = mysqli_fetch_array($order_details)) {
-            $product_id = intval($detail['ID_SanPham']);
-            $quantity = intval($detail['SoLuong']);
-            
-            // Reduce product quantity
-            mysqli_query($conn, "UPDATE sanpham SET SoLuong = SoLuong - $quantity WHERE IDSanPham = $product_id AND SoLuong >= $quantity");
-        }
-    }
+    // Stock is reserved atomically when checkout creates the order.
     
     // CRITICAL: Send WebSocket notifications REGARDLESS of whether product quantity update succeeded
     // Notifications must be sent even if other operations fail
@@ -261,7 +263,7 @@ if (isset($_GET['oder_id']) && isset($_GET['approve'])) {
     // Clear output buffer before redirect to prevent "headers already sent" error
     ob_end_clean();
 
-    if ($_GET['approve'] == 'approve') {
+    if (($_POST['return_to'] ?? '') !== 'all') {
         header('Location: Approve_Oders.php?approved=' . $oder_id);
         exit();
     } else {
@@ -323,9 +325,9 @@ if (isset($_GET['oder_id']) && isset($_GET['approve'])) {
                                         while ($row = mysqli_fetch_array($result)) {
                                             echo '<tr>';
                                             echo ' <td>' . $stt . '</td>';
-                                            echo ' <td class="text-center"> <a href="Approve_Oders.php?oder_id=' . $row['ID_DonHang'] . '&approve=approve" class="btn btn-danger">Cần Duyệt</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_order_transition_form((int) $row['ID_DonHang'], 'approve', 'Duyệt', 'btn-danger', 'approve') . '</td>';
                                             echo ' <td class="text-center"> <a href="View_Oder_Detail.php?oder_id='.$row['ID_DonHang'].'&view=approve" class="btn btn-primary">Xem Chi Tiết</a>' . '</td>';
-                                            echo ' <td class="text-center"> <a href="Delete_Oder.php?del_oder_id='.$row['ID_DonHang'].'&view=approve" class="btn btn-danger">Hủy</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_cancel_order_form((int) $row['ID_DonHang'], 'approve') . '</td>';
                                             echo ' <td>' . $row['HoVaTen'] . '</td>';
                                             echo ' <td>' . $row['SDT'] . '</td>';
                                             echo ' <td>' . $row['GhiChu'] . '</td>';

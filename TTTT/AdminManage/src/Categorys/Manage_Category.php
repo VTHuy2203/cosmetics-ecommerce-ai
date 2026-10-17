@@ -2,6 +2,7 @@
 
 <?php
     include("../DB_Connect.php");
+    require_once dirname(__DIR__, 3) . '/config/catalog.php';
 
     $sql = "SELECT * FROM danhmuc";
 
@@ -34,6 +35,8 @@
                 <!-- Begin Page Content -->
                 <div class="container-fluid">
 
+                    <?php echo catalog_delete_alert(); ?>
+
                     <!-- Page Heading -->
                     <h1 class="h3 mb-2 text-gray-800">Danh Sách Danh Mục</h1>
 
@@ -58,7 +61,7 @@
                                             echo '<tr>';
                                             echo ' <td>' . $stt . '</td>';
                                             echo ' <td class="text-center"> <a href="Update_Category.php?category_id='.$row['IDDanhMuc'].'" class="btn btn-primary">Sửa</a>' . '</td>';
-                                            echo ' <td class="text-center"> <a href="Delete_Category.php?category_id='.$row['IDDanhMuc'].'" class="btn btn-danger">Xóa</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_delete_form('Delete_Category.php', 'category_id', (int) $row['IDDanhMuc']) . '</td>';
                                             echo ' <td>' . $row['TenDanhMuc'] . '</td>';
                                             echo ' <td class="text-center">';
                                             echo '     <div class="d-flex align-items-center justify-content-center">';

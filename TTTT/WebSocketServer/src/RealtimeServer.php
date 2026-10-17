@@ -1,6 +1,8 @@
 <?php
 namespace WebSocketServer;
 
+require_once dirname(__DIR__, 2) . '/config/realtime.php';
+
 use Ratchet\MessageComponentInterface;
 use Ratchet\ConnectionInterface;
 use Ratchet\Server\IoServer;
@@ -17,8 +19,14 @@ class RealtimeServer implements MessageComponentInterface {
     
     protected $loop;
     protected $queue_file;
+    protected string $ticket_secret = '';
+    protected array $used_ticket_ids = [];
     
-    public function __construct() {
+    public function __construct(?string $ticketSecret = null, ?string $queueFile = null) {
+        $this->ticket_secret = $ticketSecret ?? (string) getenv('REALTIME_TICKET_SECRET');
+        if (strlen($this->ticket_secret) < 32) {
+            throw new \RuntimeException('REALTIME_TICKET_SECRET must contain at least 32 characters.');
+        }
         $this->clients = new \SplObjectStorage;
         $this->channels = [
             'admin_channel' => [],
@@ -26,7 +34,7 @@ class RealtimeServer implements MessageComponentInterface {
             'staff_channel' => [],
             'shipper_channel' => []
         ];
-        $this->queue_file = __DIR__ . '/../message_queue.json';
+        $this->queue_file = $queueFile ?? (__DIR__ . '/../message_queue.json');
         
         // Create queue file if it doesn't exist
         if (!file_exists($this->queue_file)) {
@@ -61,6 +69,24 @@ class RealtimeServer implements MessageComponentInterface {
         $this->loop->addPeriodicTimer(0.1, function() {
             $this->processMessageQueue();
         });
+        $this->loop->addPeriodicTimer(5, function() {
+            $this->closeExpiredConnections();
+        });
+    }
+
+    protected function closeExpiredConnections(): void {
+        $now = time();
+        foreach ($this->clients as $client) {
+            if ((int) ($client->auth_expires_at ?? 0) <= $now) {
+                $client->send(json_encode(['action' => 'error', 'code' => 'authorization_expired']));
+                $client->close();
+            }
+        }
+        foreach ($this->used_ticket_ids as $ticketId => $expiresAt) {
+            if ($expiresAt <= $now) {
+                unset($this->used_ticket_ids[$ticketId]);
+            }
+        }
     }
     
     protected $processed_messages = []; // Theo dõi tin nhắn đã xử lý để tránh trùng lặp
@@ -168,11 +194,16 @@ class RealtimeServer implements MessageComponentInterface {
         $conn->channel = null;
         $conn->role = null;
         $conn->user_id = null;
+        $conn->auth_expires_at = 0;
         
         echo "New connection! ({$conn->resourceId})\n";
     }
     
     public function onMessage(ConnectionInterface $from, $msg) {
+        if (!is_string($msg) || strlen($msg) > 4096) {
+            $this->rejectConnection($from, 'invalid_message');
+            return;
+        }
         $data = json_decode($msg, true);
         
         if (!$data) {
@@ -187,6 +218,10 @@ class RealtimeServer implements MessageComponentInterface {
         
         // Don't log ping messages - they're just keepalive heartbeats
         if ($data['action'] === 'ping') {
+            if ((int) ($from->auth_expires_at ?? 0) <= time()) {
+                $this->rejectConnection($from, 'authorization_required');
+                return;
+            }
             $from->send(json_encode(['action' => 'pong']));
             return;
         }
@@ -204,21 +239,19 @@ class RealtimeServer implements MessageComponentInterface {
     }
     
     protected function handleSubscribe(ConnectionInterface $conn, $data) {
-        $channel = $data['channel'] ?? null;
-        $role = $data['role'] ?? null;
-        $user_id = $data['user_id'] ?? null;
-        
-        echo "🔔 HandleSubscribe called for client {$conn->resourceId}: channel={$channel}, role={$role}, user_id={$user_id}\n";
-        
-        // Validate channel
-        if (!in_array($channel, ['admin_channel', 'user_channel', 'staff_channel', 'shipper_channel'])) {
-            echo "❌ ERROR: Invalid channel '{$channel}' from client {$conn->resourceId}\n";
-            $conn->send(json_encode([
-                'action' => 'error',
-                'message' => 'Invalid channel: ' . $channel
-            ]));
+        $ticket = is_string($data['ticket'] ?? null) ? $data['ticket'] : '';
+        $origin = '';
+        if (isset($conn->httpRequest) && method_exists($conn->httpRequest, 'getHeaderLine')) {
+            $origin = (string) $conn->httpRequest->getHeaderLine('Origin');
+        }
+        $identity = realtime_ticket_verify($ticket, $this->ticket_secret, $origin, time());
+        if ($identity === null || isset($this->used_ticket_ids[$identity['jti']])) {
+            $this->rejectConnection($conn, 'authorization_failed');
             return;
         }
+        $channel = (string) $identity['channel'];
+        $role = (string) $identity['role'];
+        $user_id = (int) $identity['sub'];
         
         // Remove from previous channel if exists
         if ($conn->channel && isset($this->channels[$conn->channel])) {
@@ -233,15 +266,23 @@ class RealtimeServer implements MessageComponentInterface {
         $conn->channel = $channel;
         $conn->role = $role;
         $conn->user_id = $user_id;
+        $conn->auth_expires_at = (int) $identity['exp'];
+        $this->used_ticket_ids[$identity['jti']] = (int) $identity['exp'];
         $this->channels[$channel][] = $conn;
         
         $conn->send(json_encode([
             'action' => 'subscribed',
-            'channel' => $channel
+            'channel' => $channel,
+            'expires_at' => (int) $identity['exp'],
         ]));
         
         $clientCount = count($this->channels[$channel]);
         echo "✅ Client {$conn->resourceId} subscribed to {$channel} (Total clients in channel: {$clientCount})\n";
+    }
+
+    protected function rejectConnection(ConnectionInterface $conn, string $code): void {
+        $conn->send(json_encode(['action' => 'error', 'code' => $code]));
+        $conn->close();
     }
     
     public function onClose(ConnectionInterface $conn) {
@@ -292,6 +333,10 @@ class RealtimeServer implements MessageComponentInterface {
         $filtered_count = 0;
         
         foreach ($this->channels[$channel] as $client) {
+            if ((int) ($client->auth_expires_at ?? 0) <= time()) {
+                $client->close();
+                continue;
+            }
             // Filter: If this is user_channel and message has customer_id, only send to matching user_id
             if ($channel === 'user_channel' && $target_customer_id !== null) {
                 $client_user_id = $client->user_id ? intval($client->user_id) : null;

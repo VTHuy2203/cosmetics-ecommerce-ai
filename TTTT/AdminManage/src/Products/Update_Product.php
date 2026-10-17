@@ -34,6 +34,7 @@ if (!$row) {
                     <h1 class="h3 mb-2 text-gray-800">Sửa Sản Phẩm</h1>
                     <div class="card shadow mb-4">
                         <form method="post" action="Processing_Update_product.php" enctype="multipart/form-data">
+                            <?php echo csrf_field(); ?>
                             <!-- Truyền product_id ẩn để xử lý trong file Processing_Update_product.php -->
                             <input type="hidden" name="product_id" value="<?php echo htmlspecialchars($product_id); ?>">
                             <div class="row">
@@ -106,7 +107,7 @@ if (!$row) {
                                         ClassicEditor
                                             .create(document.querySelector('#moTaChiTiet'), {
                                                 ckfinder: {
-                                                    uploadUrl: 'File_Upload.php'
+                                                    uploadUrl: 'File_Upload.php?csrf_token=<?php echo rawurlencode(csrf_token()); ?>'
                                                 }
                                             })
                                             .then(editor => {

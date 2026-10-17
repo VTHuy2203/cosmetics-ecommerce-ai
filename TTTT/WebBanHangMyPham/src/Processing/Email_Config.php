@@ -4,14 +4,12 @@
  * Gmail SMTP Settings
  */
 return [
-    'smtp_host' => 'smtp.gmail.com',
-    // 'smtp_port' => 587,
-    // 'smtp_secure' => 'tls', // Use 'tls' for port 587, 'ssl' for port 465
-    'port' => 465,
-    'smtp_secure' => 'ssl',
-    'smtp_username' => 'moshop.danang@gmail.com',
-    'smtp_password' => 'hfut obvm twyi zpfw', // Gmail App Password
-    'from_email' => 'moshop.danang@gmail.com',
-    'from_name' => 'Mơ Shop'
+    'smtp_host' => app_env('SMTP_HOST', 'smtp.gmail.com'),
+    'port' => (int) app_env('SMTP_PORT', '587'),
+    'smtp_secure' => app_env('SMTP_SECURE', 'tls'),
+    'smtp_username' => app_env('SMTP_USERNAME', ''),
+    'smtp_password' => app_env('SMTP_PASSWORD', ''),
+    'from_email' => app_env('MAIL_FROM_ADDRESS', 'no-reply@example.com'),
+    'from_name' => app_env('MAIL_FROM_NAME', 'Mơ Shop')
 ];
 ?>

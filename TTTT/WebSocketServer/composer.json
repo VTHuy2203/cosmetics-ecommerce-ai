@@ -1,8 +1,9 @@
 {
     "name": "tttt/websocket-server",
     "description": "Realtime WebSocket Server for E-commerce System",
+    "license": "proprietary",
     "require": {
-        "php": ">=7.4",
+        "php": "^8.4",
         "cboden/ratchet": "^0.4",
         "react/socket": "^1.0"
     },

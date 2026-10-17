@@ -1,19 +1,26 @@
 <?php
 include("../DB_Connect.php");
 include("../Layouts/Head.php");
+require_once dirname(__DIR__) . '/Services/CustomerEventService.php';
 
 if (isset($_GET['product_id'])) {
 
-    $product_id = $_GET['product_id'];
+    $product_id = filter_input(INPUT_GET, 'product_id', FILTER_VALIDATE_INT);
+    if (!$product_id) {
+        header('Location: index.php');
+        exit();
+    }
 
     $sql = "SELECT sanpham.IDSanPham, sanpham.TenSanPham, sanpham.IDDanhMuc, sanpham.IDThuongHieu, sanpham.SoLuong, sanpham.GiaTien, sanpham.MoTaChiTiet, sanpham.AnhSanPham, sanpham.NoiBat, sanpham.ThoiGianTao, sanpham.ThoiGianCapNhat, danhmuc.TenDanhMuc, thuonghieu.TenThuongHieu from sanpham
     INNER JOIN danhmuc on sanpham.IDDanhMuc = danhmuc.IDDanhMuc
     INNER JOIN thuonghieu on sanpham.IDThuongHieu = thuonghieu.IDThuongHieu 
-    Where sanpham.IDSanPham = '$product_id'";
+    Where sanpham.IDSanPham = ?";
 
-    $result = mysqli_query($conn, $sql);
-
-    $row = mysqli_fetch_array($result);
+    $productStatement = $conn->prepare($sql);
+    $productStatement->bind_param('i', $product_id);
+    $productStatement->execute();
+    $result = $productStatement->get_result();
+    $row = $result->fetch_array();
 
     // Kiểm tra nếu có lỗi trong quá trình truy vấn
     if (!$result) {
@@ -68,6 +75,14 @@ if (isset($_GET['product_id'])) {
 </html>';
         exit();
     }
+
+    CustomerEventService::recordMysqli(
+        $conn,
+        CustomerEventService::currentUserId(),
+        CustomerEventService::sessionId(),
+        'product_view',
+        ['product_id' => (int) $row['IDSanPham']]
+    );
 } else {
     header('Location: index.php');
     exit();
@@ -376,16 +391,7 @@ if (isset($_GET['product_id'])) {
                     <div class="card-body border-0 rounded-4 mx-3 mb-3">
                         <h5 class="mb-3">Đánh Giá Sản Phẩm</h5>
                         <?php
-                        // Get average rating
-                        @mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `danhgia` (
-                            `ID_DanhGia` INT AUTO_INCREMENT PRIMARY KEY,
-                            `ID_KhachHang` INT NOT NULL,
-                            `ID_SanPham` INT NOT NULL,
-                            `SoSao` TINYINT(1) NOT NULL,
-                            `ThoiGianTao` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                            UNIQUE KEY `unique_rating` (`ID_KhachHang`, `ID_SanPham`)
-                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-                        
+                        // Get average rating. Schema is provisioned by migrations.
                         $sql_avg_rating = "SELECT AVG(SoSao) as avg_rating, COUNT(*) as total_ratings FROM danhgia WHERE ID_SanPham = '$product_id'";
                         $result_avg_rating = mysqli_query($conn, $sql_avg_rating);
                         $avg_rating = 0;
@@ -540,13 +546,13 @@ if (isset($_GET['product_id'])) {
                     $result_list_comment = mysqli_query($conn, $sql_list_comment);
                     while ($row_list_comment = mysqli_fetch_array($result_list_comment)) {
                         $id_user_comment = $row_list_comment['ID_KhachHang'];
-                        $NoiDungBinhLuan_comment = $row_list_comment['NoiDungBinhLuan'];
+                        $NoiDungBinhLuan_comment = htmlspecialchars((string) $row_list_comment['NoiDungBinhLuan'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 
                         //lấy họ tên ng comment
                         $sql_hoten_comment = "select * from khachhang where ID_KhachHang = '$id_user_comment'";
                         $result_hoten_comment = mysqli_query($conn, $sql_hoten_comment);
                         $row_hoten_comment = mysqli_fetch_array($result_hoten_comment);
-                        $hoten_user_comment = $row_hoten_comment['HoVaTen'];
+                        $hoten_user_comment = htmlspecialchars((string) $row_hoten_comment['HoVaTen'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
                         $rating = isset($row_list_comment['rating']) ? intval($row_list_comment['rating']) : 0;
 
                         // Only show reviews from verified purchasers
@@ -739,7 +745,8 @@ if (isset($_GET['product_id'])) {
                 url: 'Cart.php',
                 data: {
                     IDSanPham: IDSanPham,
-                    addcart: 'addcart'
+                    addcart: 'addcart',
+                    csrf_token: <?php echo json_encode(csrf_token()); ?>
                 },
                 dataType: 'json',
                 success: function(response) {
@@ -783,7 +790,8 @@ if (isset($_GET['product_id'])) {
                 type: 'POST',
                 url: '../Processing/XuLy_YeuThich.php',
                 data: {
-                    IDSanPham: IDSanPham
+                    IDSanPham: IDSanPham,
+                    csrf_token: <?php echo json_encode(csrf_token()); ?>
                 },
                 success: function(response) {
                     if (response == "tontai") {
@@ -808,7 +816,8 @@ if (isset($_GET['product_id'])) {
                 url: 'Cart.php',
                 data: {
                     IDSanPham: IDSanPham,
-                    addcart: 'addcart'
+                    addcart: 'addcart',
+                    csrf_token: <?php echo json_encode(csrf_token()); ?>
                 },
                 dataType: 'json',
                 success: function(response) {
@@ -849,7 +858,8 @@ if (isset($_GET['product_id'])) {
                 url: '../Processing/XuLy_BinhLuan.php',
                 data: {
                     IDSanPham: IDSanPham,
-                    NoiDungBinhLuan: noidungbinhluan
+                    NoiDungBinhLuan: noidungbinhluan,
+                    csrf_token: <?= json_encode(csrf_token()) ?>
                 },
                 success: function(response) {
                     response = response.trim();
@@ -872,8 +882,16 @@ if (isset($_GET['product_id'])) {
                         }, 500);
                     }
                 },
-                error: function() {
-                    alert('Đã xảy ra lỗi. Vui lòng thử lại sau.');
+                error: function(xhr) {
+                    var code = (xhr.responseText || '').trim();
+                    var messages = {
+                        login_required: 'Vui lòng đăng nhập để bình luận.',
+                        csrf_invalid: 'Phiên làm việc đã hết hạn. Vui lòng tải lại trang.',
+                        not_verified_purchase: 'Bạn cần mua và nhận hàng thành công để bình luận.',
+                        return_approved: 'Bạn không thể bình luận về sản phẩm đã được hoàn trả.',
+                        invalid_comment: 'Bình luận cần có từ 1 đến 1000 ký tự và sản phẩm hợp lệ.'
+                    };
+                    alert(messages[code] || 'Đã xảy ra lỗi. Vui lòng thử lại sau.');
                 }
             });
         }
@@ -901,7 +919,8 @@ if (isset($_GET['product_id'])) {
                     url: '../Processing/XuLy_DanhGia.php',
                     data: {
                         IDSanPham: productId,
-                        rating: rating
+                        rating: rating,
+                        csrf_token: <?php echo json_encode(csrf_token()); ?>
                     },
                     success: function(response) {
                         response = response.trim();

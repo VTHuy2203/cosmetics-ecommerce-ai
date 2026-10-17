@@ -1,22 +1,36 @@
 <?php
 include("../DB_Connect.php");
-session_start();
+require_once dirname(__DIR__, 3) . '/config/uploads.php';
 if (!isset($_SESSION['user'])) { echo 'error'; exit; }
 
-$userSql = "select * from khachhang where TenDangNhap='".$_SESSION['user']."'";
-$res = mysqli_query($conn, $userSql);
-$u = mysqli_fetch_array($res);
+$userStatement = $conn->prepare('SELECT * FROM khachhang WHERE TenDangNhap = ? LIMIT 1');
+$sessionUsername = (string) $_SESSION['user'];
+$userStatement->bind_param('s', $sessionUsername);
+$userStatement->execute();
+$u = $userStatement->get_result()->fetch_assoc();
+if (!$u) { echo 'error'; exit; }
 $id = $u['ID_KhachHang'];
 
 if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])) {
+	require_csrf();
 	$action = $_POST['action'];
 	if ($action === 'info') {
-		$HoVaTen = mysqli_real_escape_string($conn, $_POST['HoVaTen']);
-		$Email = mysqli_real_escape_string($conn, $_POST['Email']);
-		$SDT = mysqli_real_escape_string($conn, $_POST['SDT']);
-		$DiaChi = mysqli_real_escape_string($conn, $_POST['DiaChi']);
-		$sql = "UPDATE khachhang SET HoVaTen='$HoVaTen', Email='$Email', SDT='$SDT', DiaChi='$DiaChi' WHERE ID_KhachHang='$id'";
-		$result = mysqli_query($conn, $sql);
+		$HoVaTen = trim((string) ($_POST['HoVaTen'] ?? ''));
+		$Email = strtolower(trim((string) ($_POST['Email'] ?? '')));
+		$SDT = trim((string) ($_POST['SDT'] ?? ''));
+		$DiaChi = trim((string) ($_POST['DiaChi'] ?? ''));
+		if ($HoVaTen === '' || mb_strlen($HoVaTen) > 50
+			|| !filter_var($Email, FILTER_VALIDATE_EMAIL) || mb_strlen($Email) > 100
+			|| !preg_match('/^[0-9+().\s-]{8,20}$/', $SDT)
+			|| $DiaChi === '' || mb_strlen($DiaChi) > 255) {
+			header('Location: ../View/Personal.php?error=invalid_profile');
+			exit();
+		}
+		$updateProfile = $conn->prepare(
+			'UPDATE khachhang SET HoVaTen = ?, Email = ?, SDT = ?, DiaChi = ? WHERE ID_KhachHang = ?'
+		);
+		$updateProfile->bind_param('ssssi', $HoVaTen, $Email, $SDT, $DiaChi, $id);
+		$result = $updateProfile->execute();
 		
 		if ($result) {
 			// Send WebSocket notification to Admin
@@ -33,14 +47,18 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action'])) {
 		exit();
 	} elseif ($action === 'avatar') {
 		if (isset($_FILES['avatar']) && is_uploaded_file($_FILES['avatar']['tmp_name'])) {
-			$folder = '../../Image_upload/';
-			@mkdir($folder, 0777, true);
-			$filename = time() . '_' . basename($_FILES['avatar']['name']);
-			$path = $folder . $filename;
-			move_uploaded_file($_FILES['avatar']['tmp_name'], $path);
-			$rel = str_replace('..', '/TTTT/WebBanHangMyPham/src', $path); // keep simple web path if needed
-			$sql = "UPDATE khachhang SET AnhDaiDien='".$path."' WHERE ID_KhachHang='$id'";
-			mysqli_query($conn, $sql);
+			try {
+				$uploadDirectory = dirname(__DIR__, 2) . '/Image_upload/avatars';
+				$filename = store_public_image_upload($_FILES['avatar'], $uploadDirectory, 3 * 1024 * 1024);
+				$path = '/TTTT/WebBanHangMyPham/Image_upload/avatars/' . $filename;
+				$update = $conn->prepare('UPDATE khachhang SET AnhDaiDien = ? WHERE ID_KhachHang = ?');
+				$update->bind_param('si', $path, $id);
+				$update->execute();
+			} catch (Throwable $error) {
+				error_log('Avatar upload failed: ' . $error->getMessage());
+				header('Location: ../View/Personal.php?error=invalid_avatar');
+				exit();
+			}
 		}
 		header('Location: ../View/Personal.php');
 		exit();

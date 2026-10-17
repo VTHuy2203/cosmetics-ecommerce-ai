@@ -1,0 +1,18 @@
+[
+  {"id":"lip-balm","collection":"cosmetics_products","question":"Tìm son dưỡng môi","relevant_ids":["37","45"]},
+  {"id":"sunscreen-oily","collection":"cosmetics_products","question":"Kem chống nắng cho da dầu","relevant_ids":["46","86"]},
+  {"id":"cleanser-acne","collection":"cosmetics_products","question":"Sữa rửa mặt cho da dầu mụn","relevant_ids":["48","85"]},
+  {"id":"micellar-oily","collection":"cosmetics_products","question":"Nước tẩy trang dành cho da dầu","relevant_ids":["52","90"]},
+  {"id":"moisturizer-dry","collection":"cosmetics_products","question":"Kem dưỡng ẩm cho da khô","relevant_ids":["47","87","88"]},
+  {"id":"daily-mask","collection":"cosmetics_products","question":"Mặt nạ dưỡng da hàng ngày","relevant_ids":["49","50","89"]},
+  {"id":"foundation","collection":"cosmetics_products","question":"Tìm kem nền trang điểm","relevant_ids":["55"]},
+  {"id":"eyeliner","collection":"cosmetics_products","question":"Shop có kẻ mắt không?","relevant_ids":["53"]},
+  {"id":"weather-negative","collection":"cosmetics_products","question":"Thời tiết Đà Nẵng hôm nay thế nào?","relevant_ids":[]},
+  {"id":"programming-negative","collection":"cosmetics_products","question":"Viết cho tôi một chương trình Python","relevant_ids":[]},
+  {"id":"oily-skin","collection":"shop_knowledge","question":"Da dầu nên chọn thành phần nào?","relevant_ids":["faq_0","skin_type_oily"]},
+  {"id":"dry-skin","collection":"shop_knowledge","question":"Da khô nên dùng sản phẩm thế nào?","relevant_ids":["faq_1","skin_type_dry"]},
+  {"id":"pregnancy","collection":"shop_knowledge","question":"Bà bầu dùng mỹ phẩm này có chắc chắn an toàn không?","relevant_ids":["faq_6"]},
+  {"id":"authenticity","collection":"shop_knowledge","question":"Làm sao phân biệt mỹ phẩm thật giả?","relevant_ids":["faq_7"]},
+  {"id":"return-policy","collection":"shop_knowledge","question":"Chính sách đổi trả của shop thế nào?","relevant_ids":["faq_8","shop_info_general"]},
+  {"id":"knowledge-negative","collection":"shop_knowledge","question":"Tỷ giá đô la hôm nay bao nhiêu?","relevant_ids":[]}
+]

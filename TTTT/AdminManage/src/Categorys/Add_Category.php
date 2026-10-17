@@ -1,29 +1,27 @@
-<?php 
-session_start(); 
+<?php
 include("../Layouts/headHTML.php"); 
+require_once dirname(__DIR__, 3) . '/config/uploads.php';
 
 if (
     isset($_POST['tenDanhMuc']) && isset($_FILES['image'])
     && $_SERVER['REQUEST_METHOD'] === 'POST'
 ) {
+    require_csrf();
     include("../DB_Connect.php");
 
-    $tenDanhMuc = $_POST['tenDanhMuc'];
-
-    $target_dir = "IMG_Category/";
-    $target_file = $target_dir . basename($_FILES["image"]["name"]);
-
-    //check file có phải là ảnh không
-    $check = getimagesize($_FILES["image"]["tmp_name"]);
-    if ($check !== false) {
-        move_uploaded_file($_FILES["image"]["tmp_name"], $target_file);
-    } else {
-        echo "File is not an image.";
+    $tenDanhMuc = trim((string) $_POST['tenDanhMuc']);
+    if ($tenDanhMuc === '' || mb_strlen($tenDanhMuc) > 255) {
+        http_response_code(422); exit('Tên danh mục không hợp lệ.');
     }
 
-    $sql = "INSERT INTO `danhmuc` (`IDDanhMuc`, `TenDanhMuc`, `AnhDanhMuc`) VALUES (null, '$tenDanhMuc', '$target_file')";
-
-    $result = mysqli_query($conn, $sql);
+    try {
+        $target_file = 'IMG_Category/' . store_public_image_upload($_FILES['image'], __DIR__ . '/IMG_Category');
+    } catch (Throwable $error) {
+        http_response_code(422); exit('Ảnh danh mục không hợp lệ.');
+    }
+    $statement = $conn->prepare('INSERT INTO danhmuc (TenDanhMuc, AnhDanhMuc) VALUES (?, ?)');
+    $statement->bind_param('ss', $tenDanhMuc, $target_file);
+    $result = $statement->execute();
 
     if ($result) {
         $category_id = mysqli_insert_id($conn);
@@ -73,6 +71,7 @@ if (
                     <!-- DataTales Example -->
                     <div class="container-fluid shadow mb-4">
                         <form method="post" enctype="multipart/form-data">
+                            <?php echo csrf_field(); ?>
                             <div class="row">
                                 <?php if (isset($_SESSION['success_message'])) : ?>
                                     <div class="alert alert-success m-4"><?php echo $_SESSION['success_message']; ?></div>

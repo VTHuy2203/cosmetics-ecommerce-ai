@@ -1,261 +1,207 @@
 <?php
-/**
- * Submit Return/Refund Request
- * Handles form submission and file uploads
- */
+declare(strict_types=1);
 
-ob_start();
+require_once __DIR__ . '/../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    http_response_code(405);
+    exit('Phương thức không hợp lệ.');
 }
-
-include("../DB_Connect.php");
-
-// Check if user is logged in
 if (!isset($_SESSION['user'])) {
-    echo 'error: Bạn cần đăng nhập để thực hiện thao tác này.';
-    exit();
+    http_response_code(401);
+    exit('Vui lòng đăng nhập lại.');
+}
+require_csrf();
+
+$orderId = filter_input(INPUT_POST, 'order_id', FILTER_VALIDATE_INT) ?: 0;
+$productId = filter_input(INPUT_POST, 'product_id', FILTER_VALIDATE_INT) ?: 0;
+$requestedQuantity = filter_input(INPUT_POST, 'quantity', FILTER_VALIDATE_INT) ?: 0;
+$contactName = trim((string) ($_POST['contact_name'] ?? ''));
+$contactPhone = trim((string) ($_POST['contact_phone'] ?? ''));
+$contactEmail = trim((string) ($_POST['contact_email'] ?? ''));
+$contactAddress = trim((string) ($_POST['contact_address'] ?? ''));
+$refundReason = trim((string) ($_POST['refund_reason'] ?? ''));
+
+if ($orderId <= 0 || $productId <= 0 || $requestedQuantity <= 0
+    || mb_strlen($contactName) < 2 || mb_strlen($contactName) > 255
+    || !preg_match('/^[0-9+ .()-]{8,20}$/', $contactPhone)
+    || !filter_var($contactEmail, FILTER_VALIDATE_EMAIL)
+    || mb_strlen($contactAddress) < 5 || mb_strlen($contactAddress) > 1000
+    || mb_strlen($refundReason) < 10 || mb_strlen($refundReason) > 4000) {
+    http_response_code(422);
+    exit('Thông tin yêu cầu hoàn trả không hợp lệ.');
 }
 
-// Check if request is POST
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    echo 'error: Phương thức yêu cầu không hợp lệ.';
-    exit();
+$userStmt = $conn->prepare('SELECT ID_KhachHang FROM khachhang WHERE TenDangNhap = ? LIMIT 1');
+$username = (string) $_SESSION['user'];
+$userStmt->bind_param('s', $username);
+$userStmt->execute();
+$user = $userStmt->get_result()->fetch_assoc();
+if (!$user) {
+    http_response_code(401);
+    exit('Tài khoản không tồn tại.');
 }
+$customerId = (int) $user['ID_KhachHang'];
 
-// Get user ID
-$sql_user = "SELECT ID_KhachHang FROM khachhang WHERE TenDangNhap = '" . mysqli_real_escape_string($conn, $_SESSION['user']) . "'";
-$result_user = mysqli_query($conn, $sql_user);
-if (!$result_user || mysqli_num_rows($result_user) == 0) {
-    echo 'error: Không tìm thấy thông tin người dùng.';
-    exit();
-}
-$row_user = mysqli_fetch_array($result_user);
-$customer_id = intval($row_user['ID_KhachHang']);
-
-// Get and validate input
-$order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : 0;
-$contact_name = isset($_POST['contact_name']) ? trim($_POST['contact_name']) : '';
-$contact_phone = isset($_POST['contact_phone']) ? trim($_POST['contact_phone']) : '';
-$contact_email = isset($_POST['contact_email']) ? trim($_POST['contact_email']) : '';
-$contact_address = isset($_POST['contact_address']) ? trim($_POST['contact_address']) : '';
-$product_id = isset($_POST['product_id']) ? intval($_POST['product_id']) : 0;
-$refund_reason = isset($_POST['refund_reason']) ? trim($_POST['refund_reason']) : '';
-
-// Validation
-if ($order_id <= 0) {
-    echo 'error: Mã đơn hàng không hợp lệ.';
-    exit();
-}
-
-if (empty($contact_name) || empty($contact_phone) || empty($contact_email) || empty($contact_address)) {
-    echo 'error: Vui lòng điền đầy đủ thông tin liên hệ.';
-    exit();
-}
-
-if ($product_id <= 0) {
-    echo 'error: Vui lòng chọn sản phẩm cần hoàn trả.';
-    exit();
-}
-
-if (empty($refund_reason)) {
-    echo 'error: Vui lòng nhập lý do hoàn trả.';
-    exit();
-}
-
-// Verify order belongs to user and is delivered and paid
-$sql_order = "SELECT * FROM donhang WHERE ID_DonHang = $order_id AND ID_KhachHang = $customer_id AND TrangThai = 3 AND DaThanhToan = 1";
-$result_order = mysqli_query($conn, $sql_order);
-
-if (!$result_order || mysqli_num_rows($result_order) == 0) {
-    echo 'error: Đơn hàng không hợp lệ hoặc không thể hoàn trả.';
-    exit();
-}
-
-$order = mysqli_fetch_array($result_order);
-
-// Check 7-day return window
-// Use NgayTao as delivery date approximation (since order status 3 = delivered)
-// Note: Ideally we should track actual delivery timestamp, but for now using order creation date
-$order_date = strtotime($order['NgayTao']);
-$current_date = time();
-$days_diff = ($current_date - $order_date) / (60 * 60 * 24);
-
-if ($days_diff > 7) {
-    echo 'error: Đơn hàng đã quá 7 ngày kể từ ngày giao hàng. Không thể yêu cầu hoàn trả.';
-    exit();
-}
-
-// Also check if order is already returned
-if (stripos($order['GhiChu'] ?? '', '[ĐÃ HOÀN TRẢ]') !== false) {
-    echo 'error: Đơn hàng này đã được hoàn trả trước đó.';
-    exit();
-}
-
-// Check if return/refund request already exists
-$sql_check = "SELECT * FROM return_refund_requests WHERE ID_DonHang = $order_id AND ID_KhachHang = $customer_id AND TrangThai != 'rejected'";
-$result_check = mysqli_query($conn, $sql_check);
-if ($result_check && mysqli_num_rows($result_check) > 0) {
-    echo 'error: Bạn đã gửi yêu cầu hoàn trả cho đơn hàng này.';
-    exit();
-}
-
-// Create return_refund_requests table if it doesn't exist
-$create_table = "CREATE TABLE IF NOT EXISTS `return_refund_requests` (
-    `ID_Request` INT AUTO_INCREMENT PRIMARY KEY,
-    `ID_DonHang` INT NOT NULL,
-    `ID_KhachHang` INT NOT NULL,
-    `ID_SanPham` INT NOT NULL,
-    `ContactName` VARCHAR(255) NOT NULL,
-    `ContactPhone` VARCHAR(20) NOT NULL,
-    `ContactEmail` VARCHAR(255) NOT NULL,
-    `ContactAddress` TEXT NOT NULL,
-    `RefundReason` TEXT NOT NULL,
-    `Attachments` TEXT NULL,
-    `TrangThai` ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
-    `ThoiGianTao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    `ThoiGianCapNhat` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_order (ID_DonHang),
-    INDEX idx_customer (ID_KhachHang),
-    INDEX idx_status (TrangThai)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-mysqli_query($conn, $create_table);
-
-// Handle file uploads
-$upload_dir = '../../../AdminManage/src/ReturnRefundAttachments/';
-if (!file_exists($upload_dir)) {
-    mkdir($upload_dir, 0777, true);
-}
-
+/** @var array<int, string> $uploadedPaths */
+$uploadedPaths = [];
 $attachments = [];
-$allowed_image_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif'];
-$allowed_video_types = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-msvideo'];
+$uploadRoot = dirname(__DIR__, 3) . '/storage/private/return_refunds';
+$allowedMime = [
+    'image/jpeg' => ['type' => 'image', 'extension' => 'jpg', 'max' => 5 * 1024 * 1024],
+    'image/png' => ['type' => 'image', 'extension' => 'png', 'max' => 5 * 1024 * 1024],
+    'image/webp' => ['type' => 'image', 'extension' => 'webp', 'max' => 5 * 1024 * 1024],
+    'video/mp4' => ['type' => 'video', 'extension' => 'mp4', 'max' => 10 * 1024 * 1024],
+    'video/quicktime' => ['type' => 'video', 'extension' => 'mov', 'max' => 10 * 1024 * 1024],
+];
 
-if (isset($_FILES['attachments']) && !empty($_FILES['attachments']['name'][0])) {
-    $files = $_FILES['attachments'];
-    $image_count = 0;
-    $video_count = 0;
-    
-    for ($i = 0; $i < count($files['name']); $i++) {
-        if ($files['error'][$i] === UPLOAD_ERR_OK) {
-            $file_type = $files['type'][$i];
-            $file_size = $files['size'][$i];
-            $file_name = $files['name'][$i];
-            $file_tmp = $files['tmp_name'][$i];
-            
-            // Check file type
-            $is_image = in_array($file_type, $allowed_image_types);
-            $is_video = in_array($file_type, $allowed_video_types);
-            
-            if (!$is_image && !$is_video) {
-                continue; // Skip invalid file types
+try {
+    if (isset($_FILES['attachments']['name']) && is_array($_FILES['attachments']['name'])) {
+        if (!is_dir($uploadRoot) && !mkdir($uploadRoot, 0750, true) && !is_dir($uploadRoot)) {
+            throw new RuntimeException('Cannot create private return evidence directory.');
+        }
+
+        $fileInfo = new finfo(FILEINFO_MIME_TYPE);
+        $imageCount = 0;
+        $videoCount = 0;
+        $totalSize = 0;
+        $names = $_FILES['attachments']['name'];
+        if (count($names) > 7) {
+            throw new DomainException('Chỉ được tải tối đa 5 ảnh và 2 video.');
+        }
+
+        foreach ($names as $index => $originalName) {
+            $error = (int) ($_FILES['attachments']['error'][$index] ?? UPLOAD_ERR_NO_FILE);
+            if ($error === UPLOAD_ERR_NO_FILE) {
+                continue;
             }
-            
-            // Check file count limits
-            if ($is_image && $image_count >= 5) {
-                continue; // Skip if already 5 images
+            if ($error !== UPLOAD_ERR_OK) {
+                throw new DomainException('Một tệp đính kèm tải lên không thành công.');
             }
-            if ($is_video && $video_count >= 2) {
-                continue; // Skip if already 2 videos
+
+            $temporaryPath = (string) ($_FILES['attachments']['tmp_name'][$index] ?? '');
+            $size = (int) ($_FILES['attachments']['size'][$index] ?? 0);
+            if (!is_uploaded_file($temporaryPath) || $size <= 0) {
+                throw new DomainException('Tệp đính kèm không hợp lệ.');
             }
-            
-            // Check file size
-            $max_size = $is_image ? (5 * 1024 * 1024) : (50 * 1024 * 1024); // 5MB for images, 50MB for videos
-            if ($file_size > $max_size) {
-                continue; // Skip oversized files
+            $mime = (string) $fileInfo->file($temporaryPath);
+            if (!isset($allowedMime[$mime]) || $size > $allowedMime[$mime]['max']) {
+                throw new DomainException('Chỉ chấp nhận JPG, PNG, WebP, MP4 hoặc MOV đúng giới hạn dung lượng.');
             }
-            
-            // Generate unique filename
-            $file_ext = pathinfo($file_name, PATHINFO_EXTENSION);
-            $new_filename = 'request_' . $order_id . '_' . time() . '_' . $i . '.' . $file_ext;
-            $upload_path = $upload_dir . $new_filename;
-            
-            if (move_uploaded_file($file_tmp, $upload_path)) {
-                $attachments[] = [
-                    'type' => $is_image ? 'image' : 'video',
-                    'filename' => $new_filename,
-                    'original_name' => $file_name
-                ];
-                
-                if ($is_image) {
-                    $image_count++;
-                } else {
-                    $video_count++;
-                }
+
+            $kind = $allowedMime[$mime]['type'];
+            $imageCount += $kind === 'image' ? 1 : 0;
+            $videoCount += $kind === 'video' ? 1 : 0;
+            $totalSize += $size;
+            if ($imageCount > 5 || $videoCount > 2 || $totalSize > 10 * 1024 * 1024) {
+                throw new DomainException('Tổng tệp vượt quá giới hạn cho phép.');
             }
+
+            $storedName = bin2hex(random_bytes(20)) . '.' . $allowedMime[$mime]['extension'];
+            $destination = $uploadRoot . DIRECTORY_SEPARATOR . $storedName;
+            if (!move_uploaded_file($temporaryPath, $destination)) {
+                throw new RuntimeException('Could not store return evidence.');
+            }
+            @chmod($destination, 0640);
+            $uploadedPaths[] = $destination;
+            $attachments[] = [
+                'type' => $kind,
+                'filename' => $storedName,
+                'original_name' => mb_substr(basename((string) $originalName), 0, 180),
+                'mime' => $mime,
+                'size' => $size,
+            ];
         }
     }
-}
 
-// Escape strings for SQL
-$contact_name_escaped = mysqli_real_escape_string($conn, $contact_name);
-$contact_phone_escaped = mysqli_real_escape_string($conn, $contact_phone);
-$contact_email_escaped = mysqli_real_escape_string($conn, $contact_email);
-$contact_address_escaped = mysqli_real_escape_string($conn, $contact_address);
-$refund_reason_escaped = mysqli_real_escape_string($conn, $refund_reason);
-$attachments_json = json_encode($attachments);
-
-// Insert return/refund request
-$sql_insert = "INSERT INTO return_refund_requests 
-               (ID_DonHang, ID_KhachHang, ID_SanPham, ContactName, ContactPhone, ContactEmail, ContactAddress, RefundReason, Attachments, TrangThai) 
-               VALUES 
-               ($order_id, $customer_id, $product_id, '$contact_name_escaped', '$contact_phone_escaped', '$contact_email_escaped', '$contact_address_escaped', '$refund_reason_escaped', '$attachments_json', 'pending')";
-
-$result_insert = mysqli_query($conn, $sql_insert);
-
-if (!$result_insert) {
-    echo 'error: Lỗi khi tạo yêu cầu hoàn trả: ' . mysqli_error($conn);
-    exit();
-}
-
-$request_id = mysqli_insert_id($conn);
-
-// Get product name for notification
-$sql_product = "SELECT TenSanPham FROM sanpham WHERE IDSanPham = $product_id";
-$result_product = mysqli_query($conn, $sql_product);
-$product_name = 'Sản phẩm';
-if ($result_product && mysqli_num_rows($result_product) > 0) {
-    $product_row = mysqli_fetch_array($result_product);
-    $product_name = $product_row['TenSanPham'];
-}
-
-// Send WebSocket notification to Admin and Staff
-$wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-if (file_exists($wsPushFile)) {
-    $old_error_reporting = error_reporting(0);
-    $old_display_errors = ini_get('display_errors');
-    ini_set('display_errors', 0);
-    try {
-        require_once($wsPushFile);
-        if (function_exists('websocket_push')) {
-            $message = "Khách hàng {$contact_name} đã yêu cầu hoàn trả đơn hàng #{$order_id} - Sản phẩm: {$product_name}";
-            websocket_push(
-                ['admin_channel', 'staff_channel'],
-                [
-                    'type' => 'return_refund_request',
-                    'title' => 'Yêu cầu hoàn trả mới',
-                    'message' => $message,
-                    'sound' => 'notification',
-                    'data' => [
-                        'request_id' => $request_id,
-                        'order_id' => $order_id,
-                        'customer_id' => $customer_id,
-                        'customer_name' => $contact_name,
-                        'product_id' => $product_id,
-                        'product_name' => $product_name,
-                        'timestamp' => date('Y-m-d H:i:s')
-                    ]
-                ]
-            );
-        }
-    } catch (Exception $e) {
-        // Silently fail
+    $conn->begin_transaction();
+    $orderStmt = $conn->prepare(
+        "SELECT d.ID_DonHang, d.GiaoHangLuc, dc.SoLuong, dc.ThanhTienThucTra
+         FROM donhang d
+         INNER JOIN donhangchitiet dc ON dc.ID_DonHang = d.ID_DonHang AND dc.ID_SanPham = ?
+         WHERE d.ID_DonHang = ? AND d.ID_KhachHang = ? AND d.TrangThai = 3
+           AND d.TrangThaiThanhToan = 'paid'
+           AND d.GiaoHangLuc IS NOT NULL AND d.GiaoHangLuc >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+         FOR UPDATE"
+    );
+    $orderStmt->bind_param('iii', $productId, $orderId, $customerId);
+    $orderStmt->execute();
+    $eligibleLine = $orderStmt->get_result()->fetch_assoc();
+    if (!$eligibleLine) {
+        throw new DomainException('Đơn hàng không thuộc thời hạn hoặc điều kiện hoàn trả.');
     }
-    error_reporting($old_error_reporting);
-    ini_set('display_errors', $old_display_errors);
-}
 
-ob_end_clean();
-header('Location: ../View/Order_Tracking.php?msg=return_request_submitted');
-exit();
+    // The detail row above is locked, so two concurrent requests for the same
+    // order line cannot reserve more units than were purchased.
+    $reservedStmt = $conn->prepare(
+        "SELECT COALESCE(SUM(SoLuongYeuCau), 0) AS reserved_quantity
+         FROM return_refund_requests
+         WHERE ID_DonHang = ? AND ID_KhachHang = ? AND ID_SanPham = ?
+           AND TrangThai IN ('pending', 'approved')"
+    );
+    $reservedStmt->bind_param('iii', $orderId, $customerId, $productId);
+    $reservedStmt->execute();
+    $reserved = (int) ($reservedStmt->get_result()->fetch_assoc()['reserved_quantity'] ?? 0);
+    if ($requestedQuantity + $reserved > (int) $eligibleLine['SoLuong']) {
+        throw new DomainException('Số lượng yêu cầu vượt quá số lượng còn có thể hoàn.');
+    }
+
+    $attachmentsJson = json_encode($attachments, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    $insert = $conn->prepare(
+        "INSERT INTO return_refund_requests
+         (ID_DonHang, ID_KhachHang, ID_SanPham, SoLuongYeuCau, ContactName, ContactPhone, ContactEmail,
+          ContactAddress, RefundReason, Attachments, TrangThai)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')"
+    );
+    $insert->bind_param(
+        'iiiissssss',
+        $orderId,
+        $customerId,
+        $productId,
+        $requestedQuantity,
+        $contactName,
+        $contactPhone,
+        $contactEmail,
+        $contactAddress,
+        $refundReason,
+        $attachmentsJson
+    );
+    $insert->execute();
+    $requestId = (int) $conn->insert_id;
+
+    $payload = json_encode(
+        ['request_id' => $requestId, 'order_id' => $orderId, 'customer_id' => $customerId,
+         'product_id' => $productId, 'quantity' => $requestedQuantity],
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+    $event = $conn->prepare(
+        "INSERT INTO outbox_events(event_type, aggregate_type, aggregate_id, payload)
+         VALUES ('return.requested', 'return_request', ?, ?)"
+    );
+    $aggregateId = (string) $requestId;
+    $event->bind_param('ss', $aggregateId, $payload);
+    $event->execute();
+    $conn->commit();
+
+    header('Location: ../View/Order_Tracking.php?msg=return_request_submitted');
+    exit;
+} catch (DomainException $error) {
+    if ($conn->errno === 0) {
+        // no-op: mysqli does not expose transaction state consistently
+    }
+    try { $conn->rollback(); } catch (Throwable) {}
+    foreach ($uploadedPaths as $path) {
+        if (is_file($path)) { @unlink($path); }
+    }
+    http_response_code(422);
+    exit(htmlspecialchars($error->getMessage(), ENT_QUOTES, 'UTF-8'));
+} catch (Throwable $error) {
+    try { $conn->rollback(); } catch (Throwable) {}
+    foreach ($uploadedPaths as $path) {
+        if (is_file($path)) { @unlink($path); }
+    }
+    error_log('Return request failed: ' . $error->getMessage());
+    http_response_code(500);
+    exit('Không thể tạo yêu cầu hoàn trả.');
+}

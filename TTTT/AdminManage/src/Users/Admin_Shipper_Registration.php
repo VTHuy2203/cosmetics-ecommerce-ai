@@ -4,8 +4,9 @@
  * Allows Admin to view and approve/reject shipper registration requests
  */
 
-include("../Layouts/headHTML.php");
-include("../DB_Connect.php");
+require_once '../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once '../Layouts/Admin_Access_Check.php';
 
 // Session is already started in headHTML.php, no need to start again
 
@@ -16,70 +17,90 @@ $is_admin = isset($_SESSION['admin_is_admin']) && $_SESSION['admin_is_admin'] ==
 
 // Handle approval/rejection/delete/edit
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && isset($_POST['request_id'])) {
+    require_csrf();
     $request_id = intval($_POST['request_id']);
-    $action = $_POST['action']; // 'approve', 'reject', 'delete', 'update'
-    
-    if ($action === 'approve' || $action === 'reject') {
-        $status = $action === 'approve' ? 'approved' : 'rejected';
-        
-        // Update shipper request status
-        $update_sql = "UPDATE shipper_requests SET status = '$status', updated_at = NOW() WHERE id = $request_id";
-        mysqli_query($conn, $update_sql);
-        
-        // If approved, update user role based on their registration
-        if ($action === 'approve') {
-            $request_info = mysqli_fetch_array(mysqli_query($conn, "SELECT user_id FROM shipper_requests WHERE id = $request_id"));
-            if ($request_info) {
-                $user_id = $request_info['user_id'];
-                // Get user's current role to determine if shipper or employee
-                $user_info = mysqli_fetch_array(mysqli_query($conn, "SELECT Role FROM khachhang WHERE ID_KhachHang = $user_id"));
-                $target_role = ($user_info && $user_info['Role'] === 'employee') ? 'employee' : 'shipper';
-                mysqli_query($conn, "UPDATE khachhang SET Role = '$target_role' WHERE ID_KhachHang = $user_id");
+    $action = (string) $_POST['action'];
+    if ($request_id < 1 || !in_array($action, ['approve', 'reject', 'delete', 'update'], true)) {
+        http_response_code(422);
+        exit('Yêu cầu không hợp lệ.');
+    }
+
+    $conn->begin_transaction();
+    try {
+        $requestStatement = $conn->prepare(
+            'SELECT user_id, requested_role, status FROM shipper_requests WHERE id = ? FOR UPDATE'
+        );
+        $requestStatement->bind_param('i', $request_id);
+        $requestStatement->execute();
+        $requestInfo = $requestStatement->get_result()->fetch_assoc();
+        if (!$requestInfo) {
+            throw new RuntimeException('Không tìm thấy yêu cầu.');
+        }
+
+        $user_id = (int) $requestInfo['user_id'];
+        if ($action === 'approve' || $action === 'reject' || $action === 'delete') {
+            $targetStatus = $action === 'approve' ? 'approved' : 'rejected';
+            $targetRole = $action === 'approve' && in_array($requestInfo['requested_role'], ['shipper', 'employee'], true)
+                ? $requestInfo['requested_role']
+                : 'customer';
+
+            $updateRequest = $conn->prepare('UPDATE shipper_requests SET status = ?, updated_at = NOW() WHERE id = ?');
+            $updateRequest->bind_param('si', $targetStatus, $request_id);
+            $updateRequest->execute();
+
+            $updateUser = $conn->prepare('UPDATE khachhang SET Role = ? WHERE ID_KhachHang = ?');
+            $updateUser->bind_param('si', $targetRole, $user_id);
+            $updateUser->execute();
+        } else {
+            $license = mb_substr(trim((string) ($_POST['license'] ?? '')), 0, 50);
+            $vehicle = mb_substr(trim((string) ($_POST['vehicle'] ?? '')), 0, 50);
+            $note = mb_substr(trim((string) ($_POST['note'] ?? '')), 0, 2000);
+            $hometown = mb_substr(trim((string) ($_POST['hometown'] ?? '')), 0, 255);
+            $permanent_address = mb_substr(trim((string) ($_POST['permanent_address'] ?? '')), 0, 1000);
+            $temporary_address = mb_substr(trim((string) ($_POST['temporary_address'] ?? '')), 0, 1000);
+            if ($license === '') {
+                throw new RuntimeException('Số CMND/CCCD không được để trống.');
             }
+            $updateRequest = $conn->prepare(
+                'UPDATE shipper_requests SET license = ?, vehicle = ?, note = ?, hometown = ?,
+                 permanent_address = ?, temporary_address = ?, updated_at = NOW() WHERE id = ?'
+            );
+            $updateRequest->bind_param(
+                'ssssssi',
+                $license,
+                $vehicle,
+                $note,
+                $hometown,
+                $permanent_address,
+                $temporary_address,
+                $request_id
+            );
+            $updateRequest->execute();
         }
-        
-        header("Location: Admin_Shipper_Registration.php?msg=" . ($action === 'approve' ? 'approved' : 'rejected'));
+
+        $conn->commit();
+        $message = match ($action) {
+            'approve' => 'approved',
+            'reject' => 'rejected',
+            'delete' => 'deleted',
+            default => 'updated',
+        };
+        header('Location: Admin_Shipper_Registration.php?msg=' . $message);
         exit();
-    } elseif ($action === 'delete') {
-        // Delete shipper/staff account
-        $request_info = mysqli_fetch_array(mysqli_query($conn, "SELECT user_id FROM shipper_requests WHERE id = $request_id"));
-        if ($request_info) {
-            $user_id = $request_info['user_id'];
-            // Delete shipper request
-            mysqli_query($conn, "DELETE FROM shipper_requests WHERE id = $request_id");
-            // Reset user role to customer
-            mysqli_query($conn, "UPDATE khachhang SET Role = 'customer' WHERE ID_KhachHang = $user_id");
-        }
-        header("Location: Admin_Shipper_Registration.php?msg=deleted");
-        exit();
-    } elseif ($action === 'update') {
-        // Handle edit form submission
-        $license = mysqli_real_escape_string($conn, $_POST['license'] ?? '');
-        $vehicle = mysqli_real_escape_string($conn, $_POST['vehicle'] ?? '');
-        $note = mysqli_real_escape_string($conn, $_POST['note'] ?? '');
-        $hometown = mysqli_real_escape_string($conn, $_POST['hometown'] ?? '');
-        $permanent_address = mysqli_real_escape_string($conn, $_POST['permanent_address'] ?? '');
-        $temporary_address = mysqli_real_escape_string($conn, $_POST['temporary_address'] ?? '');
-        
-        $update_sql = "UPDATE shipper_requests SET 
-                      license = '$license',
-                      vehicle = '$vehicle',
-                      note = '$note',
-                      hometown = '$hometown',
-                      permanent_address = '$permanent_address',
-                      temporary_address = '$temporary_address',
-                      updated_at = NOW()
-                      WHERE id = $request_id";
-        mysqli_query($conn, $update_sql);
-        
-        header("Location: Admin_Shipper_Registration.php?msg=updated");
-        exit();
+    } catch (Throwable $error) {
+        $conn->rollback();
+        error_log('Role approval failed: ' . $error->getMessage());
+        http_response_code(500);
+        exit('Không thể cập nhật yêu cầu.');
     }
 }
 
+include '../Layouts/headHTML.php';
 
 // Get filter
-$filter = $_GET['status'] ?? 'all';
+$filter = in_array(($_GET['status'] ?? 'all'), ['all', 'pending', 'approved', 'rejected'], true)
+    ? ($_GET['status'] ?? 'all')
+    : 'all';
 $search = $_GET['search'] ?? '';
 
 // Build query
@@ -279,7 +300,7 @@ if ($stats_result) {
                                                         <small>SĐT: <?php echo htmlspecialchars($req['SDT']); ?></small><br>
                                                         <?php
                                                         // Display role intention
-                                                        $user_role = $req['Role'] ?? 'customer';
+                                                        $user_role = $req['requested_role'] ?? 'shipper';
                                                         $role_intention = '';
                                                         $role_badge_class = '';
                                                         if ($user_role === 'shipper') {
@@ -314,19 +335,11 @@ if ($stats_result) {
                                                         $back_path = null;
                                                         
                                                         if ($id_card_front) {
-                                                            // Path stored in DB: 'uploads/shipper_id_cards/filename'
-                                                            // Convert to web-accessible URL
-                                                            $stored_path = htmlspecialchars($id_card_front);
-                                                            // Remove any leading slashes
-                                                            $stored_path = ltrim($stored_path, '/');
-                                                            // Build absolute path from web root
-                                                            $front_path = '/TTTT/WebBanHangMyPham/src/' . $stored_path;
+                                                            $front_path = 'Private_File.php?path=' . rawurlencode($id_card_front);
                                                         }
                                                         
                                                         if ($id_card_back) {
-                                                            $stored_path = htmlspecialchars($id_card_back);
-                                                            $stored_path = ltrim($stored_path, '/');
-                                                            $back_path = '/TTTT/WebBanHangMyPham/src/' . $stored_path;
+                                                            $back_path = 'Private_File.php?path=' . rawurlencode($id_card_back);
                                                         }
                                                         ?>
                                                         <div class="d-flex flex-column gap-2">
@@ -393,6 +406,7 @@ if ($stats_result) {
                                                         <?php if ($req['status'] === 'pending'): ?>
                                                             <!-- Pending: Show Approve and Reject buttons -->
                                                             <form method="post" style="display: inline;">
+                                                                <?php echo csrf_field(); ?>
                                                                 <input type="hidden" name="request_id" value="<?php echo $req['id']; ?>">
                                                                 <input type="hidden" name="action" value="approve">
                                                                 <button type="submit" class="btn btn-sm btn-success" onclick="return confirm('Bạn có chắc chắn muốn phê duyệt yêu cầu này?');">
@@ -400,6 +414,7 @@ if ($stats_result) {
                                                                 </button>
                                                             </form>
                                                             <form method="post" style="display: inline;">
+                                                                <?php echo csrf_field(); ?>
                                                                 <input type="hidden" name="request_id" value="<?php echo $req['id']; ?>">
                                                                 <input type="hidden" name="action" value="reject">
                                                                 <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Bạn có chắc chắn muốn từ chối yêu cầu này?');">
@@ -412,6 +427,7 @@ if ($stats_result) {
                                                                 <i class="fas fa-edit"></i> Sửa
                                                             </button>
                                                             <form method="post" style="display: inline;">
+                                                                <?php echo csrf_field(); ?>
                                                                 <input type="hidden" name="request_id" value="<?php echo $req['id']; ?>">
                                                                 <input type="hidden" name="action" value="delete">
                                                                 <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Bạn có chắc chắn muốn xóa yêu cầu này?');">
@@ -421,6 +437,7 @@ if ($stats_result) {
                                                         <?php elseif ($req['status'] === 'rejected'): ?>
                                                             <!-- Rejected: Show only Delete button -->
                                                             <form method="post" style="display: inline;">
+                                                                <?php echo csrf_field(); ?>
                                                                 <input type="hidden" name="request_id" value="<?php echo $req['id']; ?>">
                                                                 <input type="hidden" name="action" value="delete">
                                                                 <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Bạn có chắc chắn muốn xóa yêu cầu này?');">
@@ -458,6 +475,7 @@ if ($stats_result) {
                             </button>
                         </div>
                         <form method="post">
+                            <?php echo csrf_field(); ?>
                             <div class="modal-body">
                                 <input type="hidden" name="request_id" value="<?php echo $req['id']; ?>">
                                 <input type="hidden" name="action" value="update">

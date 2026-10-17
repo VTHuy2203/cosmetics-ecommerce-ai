@@ -6,49 +6,32 @@
  */
 include("../Layouts/Head.php");
 include("../DB_Connect.php");
+require_once dirname(__DIR__, 3) . '/config/returns.php';
 
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-// Check if user is logged in and is an employee
-if (!isset($_SESSION['user']) || !isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'employee') {
+// Verify the current database role; session role values can become stale.
+$user_id = filter_var($_SESSION['IDNguoiDung'] ?? null, FILTER_VALIDATE_INT);
+$username = trim((string) ($_SESSION['user'] ?? ''));
+if (!$user_id || $username === '') {
     header("Location: Login.php");
     exit();
 }
 
 // Check if employee is approved
-$user_id = $_SESSION['IDNguoiDung'];
-$employee_check = mysqli_query($conn, "SELECT status FROM shipper_requests WHERE user_id = $user_id AND status = 'approved' ORDER BY created_at DESC LIMIT 1");
-if (!$employee_check || mysqli_num_rows($employee_check) == 0) {
+$employee_check = $conn->prepare(
+    "SELECT k.Role FROM khachhang k
+     WHERE k.ID_KhachHang = ? AND k.TenDangNhap = ? AND k.Role = 'employee'
+       AND EXISTS (SELECT 1 FROM shipper_requests s WHERE s.user_id = k.ID_KhachHang AND s.status = 'approved')"
+);
+$employee_check->bind_param('is', $user_id, $username);
+$employee_check->execute();
+if (!$employee_check->get_result()->fetch_assoc()) {
     echo "<script>alert('Tài khoản nhân viên của bạn chưa được phê duyệt. Vui lòng đợi Admin phê duyệt.'); window.location.href='index.php';</script>";
     exit();
 }
 
-// Ensure table exists
-$create_table = "CREATE TABLE IF NOT EXISTS `return_refund_requests` (
-    `ID_Request` INT AUTO_INCREMENT PRIMARY KEY,
-    `ID_DonHang` INT NOT NULL,
-    `ID_KhachHang` INT NOT NULL,
-    `ID_SanPham` INT NOT NULL,
-    `ContactName` VARCHAR(255) NOT NULL,
-    `ContactPhone` VARCHAR(20) NOT NULL,
-    `ContactEmail` VARCHAR(255) NOT NULL,
-    `ContactAddress` TEXT NOT NULL,
-    `RefundReason` TEXT NOT NULL,
-    `Attachments` TEXT NULL,
-    `TrangThai` ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
-    `ThoiGianTao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    `ThoiGianCapNhat` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_order (ID_DonHang),
-    INDEX idx_customer (ID_KhachHang),
-    INDEX idx_status (TrangThai)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-mysqli_query($conn, $create_table);
-
 // Get return/refund requests with product price and quantity
-$sql_requests = "SELECT r.*, d.TongTien, k.HoVaTen as CustomerName, sp.TenSanPham, sp.GiaTien as ProductPrice, dct.SoLuong as ProductQuantity
+$sql_requests = "SELECT r.*, d.TongTien, k.HoVaTen as CustomerName, sp.TenSanPham, dct.DonGia as ProductPrice,
+                        dct.SoLuong as ProductQuantity, dct.ThanhTienThucTra
                  FROM return_refund_requests r
                  LEFT JOIN donhang d ON r.ID_DonHang = d.ID_DonHang
                  LEFT JOIN khachhang k ON r.ID_KhachHang = k.ID_KhachHang
@@ -58,7 +41,7 @@ $sql_requests = "SELECT r.*, d.TongTien, k.HoVaTen as CustomerName, sp.TenSanPha
 $result_requests = mysqli_query($conn, $sql_requests);
 
 // Handle delete request
-if (isset($_GET['delete_request']) && $_GET['delete_request'] > 0) {
+if (false && isset($_GET['delete_request']) && $_GET['delete_request'] > 0) {
     $request_id = intval($_GET['delete_request']);
     mysqli_query($conn, "DELETE FROM return_refund_requests WHERE ID_Request = $request_id AND TrangThai = 'rejected'");
     header('Location: Employee_Return_Orders.php?msg=deleted');
@@ -130,8 +113,8 @@ if (isset($_GET['delete_request']) && $_GET['delete_request'] > 0) {
                                             $refund_reason_short = mb_substr($row['RefundReason'], 0, 50) . (mb_strlen($row['RefundReason']) > 50 ? '...' : '');
                                             $created_date = isset($row['ThoiGianTao']) ? date('d/m/Y H:i', strtotime($row['ThoiGianTao'])) : 'N/A';
                                             $product_price = intval($row['ProductPrice'] ?? 0);
-                                            $product_quantity = intval($row['ProductQuantity'] ?? 0);
-                                            $refund_amount = $product_price * $product_quantity;
+                                            $product_quantity = intval($row['SoLuongYeuCau'] ?? 0);
+                                            $refund_amount = return_refund_preview_amount($row);
                                             $tong_tien = intval($row['TongTien'] ?? 0);
                                     ?>
                                         <tr>

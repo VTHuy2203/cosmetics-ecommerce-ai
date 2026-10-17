@@ -70,9 +70,9 @@ if (!$result) {
                                             echo '<tr>';
                                             echo ' <td>' . $stt . '</td>';
                                             echo ' <td class="text-center"> <button onclick="DelComment(' . $row['ID_BinhLuan'] . ')" class="btn btn-danger">Xóa</button>' . '</td>';
-                                            echo ' <td>' . $row['HoVaTen'] . '</td>';
-                                            echo ' <td>' . $row['TenSanPham'] . '</td>';
-                                            echo ' <td>' . $row['NoiDungBinhLuan'] . '</td>';
+                                            echo ' <td>' . htmlspecialchars((string) $row['HoVaTen'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</td>';
+                                            echo ' <td>' . htmlspecialchars((string) $row['TenSanPham'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</td>';
+                                            echo ' <td>' . htmlspecialchars((string) $row['NoiDungBinhLuan'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</td>';
                                             if ($row['DaMuaHang'] == 1) {
                                                 echo ' <td>Đã mua hàng</td>';
                                             } else {
@@ -108,7 +108,8 @@ if (!$result) {
                     type: 'POST',
                     url: 'Delete_Comment.php',
                     data: {
-                        IDComment: IDComment
+                        IDComment: IDComment,
+                        csrf_token: <?= json_encode(csrf_token()) ?>
                     },
                     success: function(response) {
                         if(response == "xoathanhcong")
@@ -121,8 +122,14 @@ if (!$result) {
                             alert('Không thành công');
                         }
                     },
-                    error: function() {
-                        alert('Đã xảy ra lỗi. Vui lòng thử lại sau.');
+                    error: function(xhr) {
+                        if (xhr.status === 403) {
+                            alert('Phiên làm việc hết hạn hoặc bạn không có quyền xóa bình luận. Vui lòng tải lại trang.');
+                        } else if (xhr.status === 404) {
+                            alert('Bình luận không còn tồn tại. Vui lòng tải lại trang.');
+                        } else {
+                            alert('Đã xảy ra lỗi. Vui lòng thử lại sau.');
+                        }
                     }
                 });
             }

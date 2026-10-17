@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ai:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-ai.txt
+      - name: Install AI dependencies
+        run: python -m pip install -r requirements-ai.txt
+      - name: AI contract tests
+        run: python -m unittest discover -s tests -p 'test_ai_*.py'
+      - name: Python syntax
+        run: python -m compileall -q TTTT/WebBanHangMyPham/src/ML tests
+
+  php:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mysqli, pdo_mysql, mbstring, curl, intl
+          coverage: none
+      - name: Validate Composer manifests
+        run: |
+          composer validate --working-dir=TTTT --strict
+          composer validate --working-dir=TTTT/WebBanHangMyPham/src --strict
+          composer validate --working-dir=TTTT/WebSocketServer --strict
+      - name: Install and audit PHP dependencies
+        run: |
+          composer install --working-dir=TTTT --no-interaction --no-progress
+          composer install --working-dir=TTTT/WebBanHangMyPham/src --no-interaction --no-progress
+          composer install --working-dir=TTTT/WebSocketServer --no-interaction --no-progress
+          composer audit --working-dir=TTTT --locked
+          composer audit --working-dir=TTTT/WebBanHangMyPham/src --locked
+          composer audit --working-dir=TTTT/WebSocketServer --locked
+      - name: PHP syntax
+        shell: bash
+        run: find TTTT -path '*/vendor' -prune -o -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Security and payment smoke tests
+        run: |
+          php tests/repository_boundary_test.php
+          php tests/security_smoke.php
+          php tests/sepay_gateway_smoke.php
+          php tests/voucher_smoke.php
+      - name: Python syntax
+        run: python -m py_compile TTTT/WebBanHangMyPham/src/ML/*.py
+      - name: Validate Compose manifests
+        env:
+          MYSQL_PASSWORD: ci-password
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          CLOUDFLARE_TUNNEL_TOKEN: ci-tunnel-token
+          APP_IMAGE: ghcr.io/example/moshop:ci
+          AI_IMAGE: ghcr.io/example/moshop-ai:ci
+          OLLAMA_HOST: http://ollama.example.internal:11434
+          AI_SERVICE_TOKEN: ci-ai-service-token-at-least-32-characters
+          MYSQL_HOST: mysql.example.internal
+          MYSQL_DB: webmipham1
+          MYSQL_USER: moshop
+        run: |
+          docker compose -f compose.yaml config --quiet
+          docker compose -f compose.production.yaml config --quiet
+      - name: Build production image
+        run: docker build -t moshop:${{ github.sha }} .
+      - name: Validate AI image definition
+        run: docker build --check -f Dockerfile.ai .

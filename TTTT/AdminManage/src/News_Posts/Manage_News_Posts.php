@@ -59,7 +59,7 @@
                                             echo '<tr>';
                                             echo ' <td>' . $stt . '</td>';
                                             echo ' <td class="text-center"> <a href="Update_News_Posts.php?News_Posts_id='.$row['ID_TinTucBaiViet'].'" class="btn btn-primary">Sửa</a>' . '</td>';
-                                            echo ' <td class="text-center"> <a href="Delete_News_Posts.php?News_Posts_id='.$row['ID_TinTucBaiViet'].'" class="btn btn-danger">Xóa</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_delete_form('Delete_News_Posts.php', 'News_Posts_id', (int) $row['ID_TinTucBaiViet']) . '</td>';
                                             echo ' <td>' . $row['TieuDeBaiViet'] . '</td>';
                                             echo ' <td class="text-center"> <a href="Detail_News_Posts.php?News_Posts_id=' . $row['ID_TinTucBaiViet'] . '" class="btn btn-info">Chi Tiết</a>' . '</td>';
                                             echo ' <td class="text-center">';

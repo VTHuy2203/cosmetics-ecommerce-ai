@@ -50,6 +50,7 @@ if (!$row) {
                     <!-- DataTales Example -->
                     <div class="card shadow mb-4">
                         <form method="post" action="Processing_Update_Category.php" enctype="multipart/form-data">
+                            <?php echo csrf_field(); ?>
                             <div class="m-3 form-group">
                                 <label for="tenDanhMuc">Tên Danh Mục</label>
                                 <input type="text" class="w-100 form-control" name="tenDanhMuc" id="tenDanhMuc" value="<?php echo $row['TenDanhMuc']; ?>">

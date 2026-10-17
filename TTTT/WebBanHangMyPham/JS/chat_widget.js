@@ -9,7 +9,9 @@
   const CFG = {
     PHP: window.CHAT_PHP_BASE || '/TTTT/WebBanHangMyPham/src/Processing',
     UID: window.CURRENT_USER_ID || 0,
-    NAME: window.CURRENT_USER_NAME || 'Bạn'
+    NAME: window.CURRENT_USER_NAME || 'Bạn',
+    CSRF: window.CHAT_CSRF_TOKEN || '',
+    PERSONAL: window.CHAT_PERSONAL_URL || '/TTTT/WebBanHangMyPham/src/View/Personal.php'
   };
 
   const K_CACHE = 'chat_cache';
@@ -29,11 +31,6 @@
     document.cookie = `${name}=${value};expires=${expires.toUTCString()};path=/`;
   }
 
-  function generateSessionId() {
-    // tạo ss theo format u<uid>_<timestamp>_<random_string> mục tiêu là duy nhất và dễ phân biệt người dùng
-    return 'u' + (CFG.UID || 0) + '_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-  }
-
   // Tạo ID phiên mới nếu user_id thay đổi (tài khoản mới đăng nhập)
   let storedUID = getCookie('chat_user_id');
   if (storedUID !== String(CFG.UID)) {
@@ -44,22 +41,56 @@
     setCookie('chat_user_id', String(CFG.UID), 365);
   }
 
-  const sid = getCookie(K_SESSION) || generateSessionId();
-  if (getCookie(K_SESSION) !== sid) {
+  const requestedSessionId = new URLSearchParams(window.location.search).get('chat_session');
+  const validRequestedSession = /^[A-Za-z0-9_-]{8,128}$/.test(requestedSessionId || '')
+    ? requestedSessionId
+    : null;
+  // The server creates new session ids. The URL is only a one-time selector
+  // when reopening history; after it is loaded, the cookie becomes canonical.
+  let sid = validRequestedSession || getCookie(K_SESSION) || '';
+  let upcomingAppointment = null;
+  let currentSessionInfo = null;
+
+  function setActiveSession(sessionId) {
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId || '')) return;
+    sid = sessionId;
     setCookie(K_SESSION, sid, 365);
+  }
+
+  function clearActiveSession() {
+    const previousCacheKey = cacheKey();
+    sid = '';
+    currentSessionInfo = null;
+    setCookie(K_SESSION, '', -1);
+    localStorage.removeItem(previousCacheKey);
+  }
+
+  if (sid && getCookie(K_SESSION) !== sid) {
+    setActiveSession(sid);
+  }
+
+  function consumeSessionUrl() {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('chat_session')) return;
+    url.searchParams.delete('chat_session');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+
+  function cacheKey() {
+    return `${K_CACHE}_${sid}`;
   }
 
   // Cache helpers
   function readCache() {
     try {
-      return JSON.parse(localStorage.getItem(K_CACHE) || '[]');
+      return JSON.parse(localStorage.getItem(cacheKey()) || '[]');
     } catch {
       return [];
     }
   }
 
   function writeCache(arr) {
-    localStorage.setItem(K_CACHE, JSON.stringify(arr || []));
+    localStorage.setItem(cacheKey(), JSON.stringify(arr || []));
   }
 
   function pushCache(entry) {
@@ -72,7 +103,7 @@
   // Load chat history from database
   async function loadChatHistory() {
     try {
-      const url = `${CFG.PHP}/Chat_History.php?sid=${encodeURIComponent(sid)}`;   //Load lịch sử chat
+      const url = `${CFG.PHP}/Chat_History.php${sid ? `?sid=${encodeURIComponent(sid)}` : ''}`;
       console.log('[Chat] Loading history from:', url);
       
       const res = await fetch(url, {
@@ -83,7 +114,11 @@
 
       if (res.ok) {
         const data = await res.json();
-        if (data.ok && Array.isArray(data.messages) && data.messages.length > 0) {
+        if (data.ok && Array.isArray(data.messages)) {
+          if (data.session_id) setActiveSession(data.session_id);
+          upcomingAppointment = data.upcoming_appointment || null;
+          currentSessionInfo = data.session || null;
+          consumeSessionUrl();
           console.log('[Chat] ✓ Loaded', data.messages.length, 'messages from database');
           const cached = data.messages.map(msg => ({
             message: msg.message || '',
@@ -91,14 +126,13 @@
             created_at: msg.created_at || new Date().toISOString().slice(0, 19).replace('T', ' ')
           })).filter(msg => msg.message && msg.message.trim().length > 0);
           
-          if (cached.length > 0) {
-            writeCache(cached);
-            return cached;
-          }
+          writeCache(cached);
+          return cached;
         }
       }
     } catch (e) {
       console.error('[Chat] Error loading history:', e);
+      return readCache();
     }
     return [];
   }
@@ -110,6 +144,12 @@
       Object.keys(attrs).forEach(k => {
         if (k === 'style' && typeof attrs[k] === 'object') {
           Object.assign(el.style, attrs[k]);
+        } else if (k === 'class') {
+          el.className = attrs[k];
+        } else if (k === 'for') {
+          el.htmlFor = attrs[k];
+        } else if (k.startsWith('aria-') || k.startsWith('data-')) {
+          el.setAttribute(k, attrs[k]);
         } else {
           el[k] = attrs[k];
         }
@@ -281,65 +321,41 @@
   // Render booking form
   function renderBookingForm(container, onSubmit) {
     const isLoggedIn = CFG.UID > 0;
-    const wrap = dom('div', { style: { marginTop: '12px', padding: '12px', background: '#f8f9fa', borderRadius: '8px', border: '1px solid #e5e7eb' } });
-    
-    // Build form HTML - add fields for non-logged-in users
-    // Get default time (next hour, rounded)
+    // Class-based markup: the bot bubble uses white-space:pre-wrap, so template indentation
+    // must not reach it, and the time input must not reuse the message timestamp class.
+    const wrap = dom('div', { class: 'cw-booking' });
+
+    // Default time: next full hour.
     const now = new Date();
     const nextHour = new Date(now.getTime() + 60 * 60 * 1000);
     nextHour.setMinutes(0, 0, 0);
     const defaultTime = nextHour.toTimeString().slice(0, 5); // HH:MM format
 
-    let formHTML = `
-      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
-        <div style="flex:1;min-width:140px">
-          <label style="display:block;font-size:12px;color:#555;margin-bottom:4px;font-weight:600">📅 Ngày:</label>
-          <input type="date" class="cw-date" style="width:100%;padding:10px;border:2px solid #2f9e91;border-radius:8px;font-size:14px;height:42px;box-sizing:border-box;">
-        </div>
-        <div style="flex:1;min-width:120px">
-          <label style="display:block;font-size:12px;color:#555;margin-bottom:4px;font-weight:600">⏰ Giờ:</label>
-          <input type="time" class="cw-time" value="${defaultTime}" style="width:100%;padding:10px;border:2px solid #2f9e91;border-radius:8px;font-size:14px;height:42px;box-sizing:border-box;">
-        </div>
-      </div>`;
-    
-    // Add fields for non-logged-in users
+    const field = (label, input) => `<label class="cw-booking-field"><span>${label}</span>${input}</label>`;
+    let formHTML = '<div class="cw-booking-row">'
+      + field('📅 Ngày', '<input type="date" class="cw-date cw-booking-input" required>')
+      + field('⏰ Giờ', `<input type="time" class="cw-book-time cw-booking-input" value="${defaultTime}" required>`)
+      + '</div>';
+
+    // Guests leave contact details so staff can confirm the appointment.
     if (!isLoggedIn) {
-      formHTML += `
-      <div style="margin-bottom:10px;padding:10px;background:#fff8e1;border-radius:6px;border:1px solid #ffcc02">
-        <div style="font-size:12px;color:#856404;margin-bottom:8px;font-weight:600">📝 Thông tin liên hệ (bắt buộc):</div>
-        <div style="margin-bottom:8px">
-          <label style="display:block;font-size:12px;color:#555;margin-bottom:4px;font-weight:600">👤 Họ và tên:</label>
-          <input type="text" class="cw-guest-name" placeholder="Nhập họ và tên đầy đủ" style="width:100%;padding:10px;border:2px solid #2f9e91;border-radius:8px;font-size:14px;box-sizing:border-box;" required>
-        </div>
-        <div style="margin-bottom:8px">
-          <label style="display:block;font-size:12px;color:#555;margin-bottom:4px;font-weight:600">📱 Số điện thoại:</label>
-          <input type="tel" class="cw-guest-phone" placeholder="Ví dụ: 0912345678" style="width:100%;padding:10px;border:2px solid #2f9e91;border-radius:8px;font-size:14px;box-sizing:border-box;" required>
-        </div>
-        <div style="margin-bottom:4px">
-          <label style="display:block;font-size:12px;color:#555;margin-bottom:4px;font-weight:600">📍 Địa chỉ:</label>
-          <input type="text" class="cw-guest-address" placeholder="Nhập địa chỉ để nhân viên liên hệ" style="width:100%;padding:10px;border:2px solid #2f9e91;border-radius:8px;font-size:14px;box-sizing:border-box;" required>
-        </div>
-      </div>`;
+      formHTML += '<div class="cw-booking-contact"><div class="cw-booking-title">📝 Thông tin liên hệ (bắt buộc)</div>'
+        + field('👤 Họ và tên', '<input type="text" class="cw-guest-name cw-booking-input" placeholder="Nhập họ và tên đầy đủ" autocomplete="name" required>')
+        + field('📱 Số điện thoại', '<input type="tel" class="cw-guest-phone cw-booking-input" placeholder="Ví dụ: 0912345678" autocomplete="tel" inputmode="tel" required>')
+        + field('📍 Địa chỉ', '<input type="text" class="cw-guest-address cw-booking-input" placeholder="Địa chỉ để nhân viên liên hệ" autocomplete="street-address" required>')
+        + '</div>';
     }
-    
-    formHTML += `<button class="cw-book" style="background:#2f9e91;color:#fff;border:0;border-radius:6px;padding:10px 16px;cursor:pointer;font-weight:500;width:100%;font-size:14px;transition:background 0.2s">Đặt lịch tư vấn</button>`;
-    
+
+    formHTML += '<button type="button" class="cw-book">Đặt lịch tư vấn</button>';
+
     wrap.innerHTML = formHTML;
 
     const btn = wrap.querySelector('.cw-book');
     const dateInput = wrap.querySelector('.cw-date');
-    const timeInput = wrap.querySelector('.cw-time');
+    const timeInput = wrap.querySelector('.cw-book-time');
 
     const today = new Date().toISOString().split('T')[0];
     dateInput.setAttribute('min', today);
-
-    // Add hover effect
-    btn.addEventListener('mouseenter', () => {
-      btn.style.background = '#25877a';
-    });
-    btn.addEventListener('mouseleave', () => {
-      btn.style.background = '#2f9e91';
-    });
 
     btn.addEventListener('click', async () => {
       const d = dateInput.value;
@@ -368,10 +384,10 @@
           return;
         }
 
-        // Validate phone number format (basic) - more flexible
-        const cleanPhone = guestPhone.replace(/[\s\-\+]/g, '');
-        if (!/^[0-9]{9,12}$/.test(cleanPhone)) {
-          alert('Số điện thoại không hợp lệ. Vui lòng nhập 9-12 chữ số');
+        // Same rule as the server (Chat_Send.php validateGuestContact): Vietnamese mobile numbers.
+        const cleanPhone = guestPhone.replace(/[\s.\-()]/g, '');
+        if (!/^(?:0|\+84)(?:3|5|7|8|9)\d{8}$/.test(cleanPhone)) {
+          alert('Số điện thoại không hợp lệ. Vui lòng nhập số di động Việt Nam, ví dụ 0912345678');
           return;
         }
       }
@@ -398,7 +414,6 @@
       // Disable button during submission
       btn.disabled = true;
       btn.textContent = 'Đang gửi...';
-      btn.style.opacity = '0.6';
       
       try {
         // Call onSubmit which will send the message
@@ -410,7 +425,6 @@
         alert('Có lỗi xảy ra khi đặt lịch. Vui lòng thử lại.');
         btn.disabled = false;
         btn.textContent = 'Đặt lịch tư vấn';
-        btn.style.opacity = '1';
       }
     });
 
@@ -424,12 +438,62 @@
     container.appendChild(wrap);
   }
 
+  function renderAppointmentNotice(body) {
+    if (!upcomingAppointment || !upcomingAppointment.appt_at) return;
+
+    const appointmentDate = new Date(String(upcomingAppointment.appt_at).replace(' ', 'T'));
+    const formatted = Number.isNaN(appointmentDate.getTime())
+      ? ''
+      : appointmentDate.toLocaleString('vi-VN', {
+          day: '2-digit', month: '2-digit', year: 'numeric',
+          hour: '2-digit', minute: '2-digit'
+        });
+    const notice = dom('div', { class: 'cw-appointment-notice' });
+    const icon = dom('i', { class: 'far fa-calendar-check' });
+    const text = dom('span', null, formatted
+      ? `Bạn đang có 1 lịch tư vấn lúc ${formatted}.`
+      : 'Bạn đang có 1 lịch tư vấn.');
+    const link = dom('a', { href: `${CFG.PERSONAL}#consultation-history` }, 'Xem ngay');
+    notice.append(icon, text, link);
+    body.append(notice);
+  }
+
+  function renderSessionContext(body, messageCount) {
+    const context = dom('div', { class: 'cw-session-context' });
+    const label = dom('div', { class: 'cw-session-context-label' });
+    const icon = dom('i', { class: 'far fa-comment-dots' });
+    const title = currentSessionInfo?.title || (messageCount > 0 ? 'Đoạn chat hiện tại' : 'Cuộc trò chuyện mới');
+    label.append(icon, dom('span', null, title));
+    const count = dom('small', null, `${messageCount} tin nhắn`);
+    context.append(label, count);
+    body.append(context);
+  }
+
+  function renderEmptyState(body) {
+    const empty = dom('div', { class: 'cw-empty-state' });
+    const icon = dom('div', { class: 'cw-empty-state-icon' });
+    icon.innerHTML = '<i class="far fa-comments"></i>';
+    empty.append(
+      icon,
+      dom('strong', null, 'Cuộc trò chuyện mới'),
+      dom('span', null, 'Hãy nhập nhu cầu của bạn để Mơ Shop bắt đầu tư vấn.')
+    );
+    body.append(empty);
+  }
+
   // Hiển thị tin nhắn với giao diện người dùng được cải tiến (ảnh đại diện, tên người gửi, dấu thời gian)
   function render(messages) {
     const body = document.querySelector('.cw-body');
     if (!body) return;
 
     body.innerHTML = '';
+    renderSessionContext(body, Array.isArray(messages) ? messages.length : 0);
+    renderAppointmentNotice(body);
+    if (!Array.isArray(messages) || messages.length === 0) {
+      renderEmptyState(body);
+      body.scrollTop = 0;
+      return;
+    }
     messages.forEach(m => {
       const isBot = m.direction === 'bot';
       const isUser = !isBot;
@@ -451,7 +515,7 @@
 
       // Sender name label
       const sender = dom('div', { class: 'cw-sender' });
-      sender.textContent = isUser ? (CFG.NAME || 'Bạn') : 'Mơ Shop';
+      sender.textContent = isUser ? 'Bạn' : 'Mơ Shop AI';
 
       // Message bubble
       const bubble = dom('div', { class: 'cw-bubble' });
@@ -461,7 +525,7 @@
       bubble.innerHTML = renderedHTML;
 
       // Timestamp
-      const timeEl = dom('div', { class: 'cw-time' });
+      const timeEl = dom('div', { class: 'cw-time cw-message-time' });
       timeEl.textContent = fmtTime(m.created_at || '');
 
       // Tập hợp nội dung
@@ -484,6 +548,74 @@
       }
     });
     body.scrollTop = body.scrollHeight;
+  }
+
+  // CHAT_UI_V2_BEGIN: temporary visual indicator; safe to remove for rollback.
+  function showTypingIndicator() {
+    const body = document.querySelector('.cw-body');
+    if (!body || body.querySelector('.cw-typing-row')) return;
+
+    const row = dom('div', { class: 'cw-msg bot cw-typing-row' });
+    const avatar = dom('div', { class: 'cw-avatar' }, '🌸');
+    const content = dom('div', { class: 'cw-content' });
+    const sender = dom('div', { class: 'cw-sender' }, 'Mơ Shop');
+    const bubble = dom('div', { class: 'cw-bubble cw-typing' });
+    bubble.setAttribute('aria-label', 'Mơ Shop đang trả lời');
+    bubble.append(dom('span'), dom('span'), dom('span'));
+    content.append(sender, bubble);
+    row.append(avatar, content);
+    body.append(row);
+    body.scrollTop = body.scrollHeight;
+  }
+
+  function hideTypingIndicator() {
+    document.querySelector('.cw-typing-row')?.remove();
+  }
+  // CHAT_UI_V2_END
+
+  async function runSessionAction(action) {
+    if (action === 'delete' && !window.confirm('Xóa vĩnh viễn cuộc trò chuyện này khỏi lịch sử? Lịch tư vấn vẫn được giữ lại.')) {
+      return;
+    }
+
+    const buttons = document.querySelectorAll('.cw-new-chat, .cw-delete-chat, .cw-quick-reply');
+    buttons.forEach(button => { button.disabled = true; });
+    try {
+      const response = await fetch(`${CFG.PHP}/Chat_Session_Action.php`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': CFG.CSRF
+        },
+        body: JSON.stringify({ action, session_id: sid })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok || (action === 'new' && !data.session_id)) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+
+      upcomingAppointment = data.upcoming_appointment || null;
+      if (action === 'delete') {
+        clearActiveSession();
+      } else {
+        setActiveSession(data.session_id);
+        currentSessionInfo = data.session || { title: 'Cuộc trò chuyện mới' };
+      }
+      consumeSessionUrl();
+      writeCache([]);
+      render([]);
+      if (action === 'delete' && document.getElementById('chat-history')) {
+        window.setTimeout(() => window.location.reload(), 150);
+        return;
+      }
+      document.querySelector('.cw-input')?.focus();
+    } catch (error) {
+      console.error('[Chat] Session action failed:', error);
+      window.alert('Không thể thực hiện thao tác. Vui lòng tải lại trang và thử lại.');
+    } finally {
+      buttons.forEach(button => { button.disabled = false; });
+    }
   }
 
   // Chào người dùng - chỉ khi nhấn nút "Tin nhắn"
@@ -516,6 +648,10 @@
 
     input.value = '';
     input.disabled = true;
+    const sendButton = document.querySelector('.cw-send');
+    if (sendButton) sendButton.disabled = true;
+    const quickReplyButtons = document.querySelectorAll('.cw-quick-reply');
+    quickReplyButtons.forEach(button => { button.disabled = true; });
 
     // Thêm thông báo người dùng vào giao diện người dùng
     const userMsg = {
@@ -524,11 +660,12 @@
       created_at: new Date().toISOString().slice(0, 19).replace('T', ' ')
     };
     render(pushCache(userMsg));
+    showTypingIndicator();
 
     try {
       const res = await fetch(`${CFG.PHP}/Chat_Send.php`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.CHAT_CSRF_TOKEN || '' },
         body: JSON.stringify({
           message: msg,
           session_id: sid
@@ -541,6 +678,9 @@
 
       const data = await res.json();
       if (data.ok && data.reply) {
+        if (data.session_id) setActiveSession(data.session_id);
+        if (data.session) currentSessionInfo = data.session;
+        if (data.upcoming_appointment) upcomingAppointment = data.upcoming_appointment;
         const botMsg = {
           message: data.reply,
           direction: 'bot',
@@ -575,7 +715,10 @@
       };
       render(pushCache(errorMsg));
     } finally {
+      hideTypingIndicator();
       input.disabled = false;
+      if (sendButton) sendButton.disabled = false;
+      quickReplyButtons.forEach(button => { button.disabled = false; });
       input.focus();
     }
   }
@@ -591,34 +734,29 @@
         if (e.key === 'Enter') send();
       });
     }
+
+    document.querySelectorAll('.cw-quick-reply').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const quickMessage = String(button.dataset.message || '').trim();
+        if (!input || !quickMessage || input.disabled) return;
+        input.value = quickMessage;
+        await send();
+      });
+    });
+
+    document.querySelector('.cw-new-chat')?.addEventListener('click', () => runSessionAction('new'));
+    document.querySelector('.cw-delete-chat')?.addEventListener('click', () => runSessionAction('delete'));
+
+    if (validRequestedSession) {
+      window.setTimeout(() => document.getElementById('chat-toggle-btn')?.click(), 150);
+    }
   }
   
   // Tải khung chat khi nhấn nút Tin nhắn
   async function loadChatOnClick() {
-    const today = new Date().toISOString().slice(0, 10);
-    const greetedKey = K_GREETED + '_' + (CFG.UID || 0); // Per-user greeting key
-    const greeted = localStorage.getItem(greetedKey);
-
     // Tải lịch sử từ cơ sở dữ liệu (theo user_id)
     const history = await loadChatHistory();
-    if (history.length > 0) {
-      // Người dùng có lịch sử trò chuyện trước đó - khôi phục lại
-      render(history);
-    } else {
-      // Chưa có lịch sử giao dịch - hiển thị lời chào cho tài khoản mới hoặc lần đầu tiên truy cập hôm nay
-      if (greeted !== today) {
-        greetNow();
-      } else {
-        // Tải từ bộ nhớ đệm nếu có
-        const cache = readCache();
-        if (cache.length > 0) {
-          render(cache);
-        } else {
-          // Không có bộ nhớ đệm nào cả - hiển thị lời chào
-          greetNow();
-        }
-      }
-    }
+    render(history);
     
     // Focus input
     const input = document.querySelector('.cw-input');

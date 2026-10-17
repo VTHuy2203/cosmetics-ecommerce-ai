@@ -2,58 +2,16 @@
 // Admin/Export_Users_CSV.php - Export users with lead filter and detailed info
 header('Content-Type: text/csv; charset=utf-8');
 header('Content-Disposition: attachment; filename="users_export_' . date('Y-m-d') . '.csv"');
-
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__) . '/DB_Connect.php';
+if (!isset($_SESSION['admin_id']) || !in_array((string) ($_SESSION['admin_role'] ?? ''), ['admin','manager','employee'], true)) {
+  http_response_code(403);
+  exit('Access denied.');
 }
-
-$DEFAULTS = [
-  "DB_HOST"    => "127.0.0.1",
-  "DB_NAME"    => "webmipham1",
-  "DB_USER"    => "root",
-  "DB_PASS"    => "",
-  "DB_CHARSET" => "utf8mb4",
-];
-
-function pdo_connect($cfg){
-  $dsn = "mysql:host={$cfg['DB_HOST']};dbname={$cfg['DB_NAME']};charset={$cfg['DB_CHARSET']}";
-  return new PDO($dsn, $cfg['DB_USER'], $cfg['DB_PASS'], [
-    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
-  ]);
-}
-
-function mysqli_connect_old(){
-  return mysqli_connect("127.0.0.1", "root", "", "webmipham1");
-}
-
-$pdo = pdo_connect($DEFAULTS);
-$conn = mysqli_connect_old();
+$pdo = app_pdo();
 
 // Get filter from query string
 $lead_filter = isset($_GET['lead']) ? trim($_GET['lead']) : '';
-
-// Check which columns exist in leads table
-$columns = $pdo->query("SHOW COLUMNS FROM leads")->fetchAll(PDO::FETCH_COLUMN);
-$has_created_at = in_array('created_at', $columns);
-$has_updated_at = in_array('updated_at', $columns);
-$has_last_interaction = in_array('last_interaction', $columns);
-$has_ThoiGianTao = in_array('ThoiGianTao', $columns);
-
-// Build the query based on available columns
-$timeColumn = 'last_interaction';
-if (!$has_last_interaction) {
-  if ($has_updated_at) {
-    $timeColumn = 'updated_at';
-  } else if ($has_created_at) {
-    $timeColumn = 'created_at';
-  } else if ($has_ThoiGianTao) {
-    $timeColumn = 'ThoiGianTao';
-  } else {
-    $timeColumn = 'NULL';
-  }
-}
 
 // Output CSV headers
 $out = fopen('php://output', 'w');
@@ -70,7 +28,7 @@ fputcsv($out, [
   'Số Dư',
   'Lead Label',
   'Lead Score',
-  'Lead Probability (%)',
+  'Spam Risk (0-100)',
   'Sản Phẩm Quan Tâm',
   'Nhu Cầu Gần Nhất',
   'Lần Tương Tác Cuối',
@@ -80,10 +38,10 @@ fputcsv($out, [
   'Tin Nhắn Chat (Bot)',
   'Session ID',
   'Ghi Chú'
-], ',');
+], ',', '"', '');
 
 // Get all users from khachhang table
-$users_sql = "SELECT * FROM khachhang";
+$users_sql = "SELECT * FROM khachhang WHERE Role = 'customer' OR Role IS NULL";
 $users_result = mysqli_query($conn, $users_sql);
 
 while ($user = mysqli_fetch_assoc($users_result)) {
@@ -100,45 +58,25 @@ while ($user = mysqli_fetch_assoc($users_result)) {
   $has_appointment = 'Không';
   
   try {
-    // Build ORDER BY clause based on available columns
-    $orderByCol = 'id';
-    if ($has_updated_at) {
-      $orderByCol = 'updated_at';
-    } else if ($has_created_at) {
-      $orderByCol = 'created_at';
-    } else if ($has_ThoiGianTao) {
-      $orderByCol = 'ThoiGianTao';
-    } else if ($has_last_interaction) {
-      $orderByCol = 'last_interaction';
-    }
-    
-    $lead_stmt = $pdo->prepare("SELECT label, score, product_interest, last_message, last_interaction, appointment_at FROM leads WHERE user_id = ? ORDER BY $orderByCol DESC LIMIT 1");
+    $lead_stmt = $pdo->prepare("SELECT sc.segment AS label,sc.intent_score AS score,sc.spam_risk_score,sc.calculated_at AS last_interaction,
+                                      ca.product_interest,ca.last_need,ca.has_appointment,ca.session_id
+                               FROM customer_scores_current sc
+                               LEFT JOIN customer_analysis ca ON ca.id=(SELECT ca2.id FROM customer_analysis ca2 WHERE ca2.user_id=sc.user_id ORDER BY ca2.updated_at DESC,ca2.id DESC LIMIT 1)
+                               WHERE sc.user_id=? LIMIT 1");
     $lead_stmt->execute([$user_id]);
     $lead = $lead_stmt->fetch();
     
     if ($lead) {
       $lead_label = $lead['label'] ?? 'N/A';
       $lead_score = $lead['score'] ?? 0;
-      $lead_prob = min(100, max(0, (int)$lead_score));
+      $lead_prob = min(100, max(0, (int) ($lead['spam_risk_score'] ?? 0)));
       $product_interest = $lead['product_interest'] ?? '';
-      $last_need = $lead['last_message'] ?? '';
-      $appointment_at = $lead['appointment_at'] ?? '';
-      $has_appointment = !empty($appointment_at) ? 'Có' : 'Không';
+      $last_need = $lead['last_need'] ?? '';
+      $has_appointment = !empty($lead['has_appointment']) ? 'Có' : 'Không';
       
       // Apply filter
       if ($lead_filter !== '') {
-        // Map Vietnamese labels to English
-        $label_map = [
-          'potential' => 'potential',
-          'Tiềm năng cao' => 'potential',
-          'Đã đặt lịch' => 'potential',
-          'Cần chăm sóc' => 'potential',
-          'average' => 'neutral',
-          'normal' => 'neutral',
-          'spam' => 'spam'
-        ];
-        $mapped_label = $label_map[$lead_label] ?? $lead_label;
-        if ($mapped_label !== $lead_filter) {
+        if ($lead_label !== $lead_filter) {
           continue; // Skip this user if doesn't match filter
         }
       }
@@ -149,7 +87,7 @@ while ($user = mysqli_fetch_assoc($users_result)) {
       }
     }
   } catch (Exception $e) {
-    // If leads table query fails, continue with user data only
+    // If the scoring query fails, continue with user data only
   }
   
   // Get chat messages for this user
@@ -175,43 +113,25 @@ while ($user = mysqli_fetch_assoc($users_result)) {
     // If chat_messages query fails, continue
   }
   
-  // Get session ID - Try multiple sources
+  // Get session and appointment information from the active chat tables.
   $session_id = '';
   try {
-    // First try from leads table
-    $orderByCol = 'id';
-    if ($has_updated_at) {
-      $orderByCol = 'updated_at';
-    } else if ($has_created_at) {
-      $orderByCol = 'created_at';
-    } else if ($has_ThoiGianTao) {
-      $orderByCol = 'ThoiGianTao';
-    } else if ($has_last_interaction) {
-      $orderByCol = 'last_interaction';
-    }
-    
-    $sid_stmt = $pdo->prepare("SELECT session_id FROM leads WHERE user_id = ? ORDER BY $orderByCol DESC LIMIT 1");
+    $sid_stmt = $pdo->prepare("SELECT session_id FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT 1");
     $sid_stmt->execute([$user_id]);
     $sid_row = $sid_stmt->fetch();
     if ($sid_row && !empty($sid_row['session_id'])) {
       $session_id = $sid_row['session_id'];
     } else {
-      // Fallback to chat_messages
-      $sid_stmt2 = $pdo->prepare("SELECT session_id FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT 1");
+      $sid_stmt2 = $pdo->prepare("SELECT session_id FROM chat_appointments WHERE user_id = ? ORDER BY id DESC LIMIT 1");
       $sid_stmt2->execute([$user_id]);
       $sid_row2 = $sid_stmt2->fetch();
       if ($sid_row2 && !empty($sid_row2['session_id'])) {
         $session_id = $sid_row2['session_id'];
-      } else {
-        // Try chat_appointments
-        $sid_stmt3 = $pdo->prepare("SELECT session_id FROM chat_appointments WHERE user_id = ? ORDER BY id DESC LIMIT 1");
-        $sid_stmt3->execute([$user_id]);
-        $sid_row3 = $sid_stmt3->fetch();
-        if ($sid_row3 && !empty($sid_row3['session_id'])) {
-          $session_id = $sid_row3['session_id'];
-        }
       }
     }
+    $appointmentStmt = $pdo->prepare('SELECT MAX(appt_at) FROM chat_appointments WHERE user_id=?');
+    $appointmentStmt->execute([$user_id]);
+    $appointment_at = (string) ($appointmentStmt->fetchColumn() ?: '');
   } catch (Exception $e) {
     // Continue if session_id query fails
   }
@@ -220,17 +140,6 @@ while ($user = mysqli_fetch_assoc($users_result)) {
   $last_interaction = '';
   if ($lead && isset($lead['last_interaction'])) {
     $last_interaction = $lead['last_interaction'];
-  } else if ($timeColumn !== 'NULL') {
-    try {
-      $interaction_stmt = $pdo->prepare("SELECT $timeColumn FROM leads WHERE user_id = ? ORDER BY $timeColumn DESC LIMIT 1");
-      $interaction_stmt->execute([$user_id]);
-      $interaction_row = $interaction_stmt->fetch();
-      if ($interaction_row) {
-        $last_interaction = $interaction_row[$timeColumn] ?? '';
-      }
-    } catch (Exception $e) {
-      // Continue if last_interaction query fails
-    }
   }
   
   // Get notes from chat_appointments (most recent appointment note)
@@ -258,18 +167,6 @@ while ($user = mysqli_fetch_assoc($users_result)) {
     // Continue if notes query fails
   }
   
-  // Get customer needs from customer_needs table if available
-  if (!$last_need) {
-    try {
-      $need_result = mysqli_query($conn, "SELECT need_text FROM customer_needs WHERE user_id=$user_id ORDER BY created_at DESC LIMIT 1");
-      if ($need_result && ($need_row = mysqli_fetch_assoc($need_result))) {
-        $last_need = $need_row['need_text'];
-      }
-    } catch (Exception $e) {
-      // Continue if customer_needs query fails
-    }
-  }
-  
   // Write CSV row
   fputcsv($out, [
     $user_id,
@@ -280,7 +177,7 @@ while ($user = mysqli_fetch_assoc($users_result)) {
     number_format($user['SoDu'] ?? 0, 0, ',', '.') . ' đ',
     $lead_label,
     $lead_score,
-    $lead_prob . '%',
+    $lead_prob,
     $product_interest,
     $last_need,
     $last_interaction ?: 'N/A',
@@ -290,7 +187,7 @@ while ($user = mysqli_fetch_assoc($users_result)) {
     substr($bot_messages, 0, 500),  // Limit message length
     $session_id ?: 'N/A',
     $notes_text ?: '' // Ghi chú từ appointment
-  ], ',');
+  ], ',', '"', '');
 }
 
 fclose($out);

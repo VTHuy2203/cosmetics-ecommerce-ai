@@ -124,7 +124,7 @@ if (isset($_GET['oder_id']) && isset($_GET['view'])) {
                                             $product_info = mysqli_fetch_array($result_select_product);
                                             
                                             // Calculate product line total
-                                            $product_price = intval($product_info['GiaTien']);
+                                            $product_price = intval($oder_detail['DonGia'] ?? 0);
                                             $product_quantity = intval($oder_detail['SoLuong']);
                                             $line_total = $product_price * $product_quantity;
                                             $product_subtotal += $line_total;
@@ -134,20 +134,15 @@ if (isset($_GET['oder_id']) && isset($_GET['view'])) {
                                                     <td class="align-middle"><img src="../../../AdminManage/src/Products/' . $product_info['AnhSanPham'] . '" class="img-fluid rounded-3" style="max-height: 50px"></td>
                                                     <td class="align-middle">' . $product_info['TenSanPham'] . '</td>
                                                     <td class="align-middle">' . $oder_detail['SoLuong'] . '</td>
-                                                    <td class="align-middle">' . number_format($product_info['GiaTien'], 0, ',', '.') . ' đ</td>
+                                                    <td class="align-middle">' . number_format($product_price, 0, ',', '.') . ' đ</td>
                                                 </tr>';
                                             $stt++;
                                         }
                                         
-                                        // Calculate shipping fee
-                                        $free_shipping_threshold = 500000; // 500,000 VND
-                                        $shipping_fee = 0;
-                                        if ($product_subtotal > 0 && $product_subtotal < $free_shipping_threshold) {
-                                            $shipping_fee = 25000; // 25,000 VND shipping fee
-                                        }
-                                        
-                                        // Total amount (should match TongTien in database)
-                                        $calculated_total = $product_subtotal + $shipping_fee;
+                                        // Transaction snapshots are the only source for historical money.
+                                        $product_subtotal = (int) ($row['SoTienHang'] ?? $product_subtotal);
+                                        $shipping_fee = (int) ($row['PhiVanChuyen'] ?? 0);
+                                        $calculated_total = (int) ($row['TongTien'] ?? 0);
                                         ?>
                                     </tbody>
                                     <tfoot>

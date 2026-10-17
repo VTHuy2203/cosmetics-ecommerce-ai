@@ -1,362 +1,305 @@
 <?php
-/**
- * Admin Return/Cancellation Requests Page
- * Displays all return/refund requests and canceled orders
- */
-include("../Layouts/headHTML.php");
-include("../DB_Connect.php");
+declare(strict_types=1);
 
-// Check admin access
-$admin_role = $_SESSION['admin_role'] ?? null;
-$is_admin_or_manager = ($admin_role === 'admin' || $admin_role === 'manager');
+require_once __DIR__ . '/../DB_Connect.php';
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once dirname(__DIR__, 3) . '/config/returns.php';
+require_once __DIR__ . '/../Layouts/Admin_Access_Check.php';
 
-if (!$is_admin_or_manager) {
-    header("Location: ../View/Admin_Login.php");
-    exit();
+$adminRole = (string) ($_SESSION['admin_role'] ?? '');
+if (!in_array($adminRole, ['admin', 'manager'], true)) {
+    header('Location: ../View/Admin_Login.php');
+    exit;
 }
 
-// Handle delete request
-if (isset($_GET['delete_request']) && $is_admin_or_manager) {
-    $delete_id = intval($_GET['delete_request']);
-    mysqli_query($conn, "DELETE FROM return_refund_requests WHERE ID_Request = $delete_id");
-    header('Location: Admin_Return_Cancellation_Requests.php?msg=deleted');
-    exit();
+function return_admin_h(mixed $value): string
+{
+    return htmlspecialchars((string) ($value ?? ''), ENT_QUOTES, 'UTF-8');
 }
 
-// Handle delete canceled order
-if (isset($_GET['delete_order']) && $is_admin_or_manager) {
-    $delete_order_id = intval($_GET['delete_order']);
-    // Check if order is canceled or approved return
-    $order_check = mysqli_query($conn, "SELECT TrangThai, GhiChu FROM donhang WHERE ID_DonHang = $delete_order_id");
-    if ($order_check && mysqli_num_rows($order_check) > 0) {
-        $order_data = mysqli_fetch_array($order_check);
-        $ghi_chu = $order_data['GhiChu'] ?? '';
-        // Only allow deletion if order is canceled or has approved return
-        if (stripos($ghi_chu, '[ĐÃ HỦY]') !== false || stripos($ghi_chu, '[ĐÃ HOÀN TRẢ]') !== false) {
-            // Delete order details first
-            mysqli_query($conn, "DELETE FROM donhangchitiet WHERE ID_DonHang = $delete_order_id");
-            // Delete the order
-            mysqli_query($conn, "DELETE FROM donhang WHERE ID_DonHang = $delete_order_id");
-        }
+function return_admin_redirect(string $type, string $message): never
+{
+    $_SESSION['return_admin_flash'] = [$type, $message];
+    header('Location: Admin_Return_Cancellation_Requests.php');
+    exit;
+}
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+    require_csrf();
+    $action = (string) ($_POST['action'] ?? '');
+    if ($action !== 'mark_returned') {
+        return_admin_redirect('danger', 'Thao tác không hợp lệ.');
     }
-    header('Location: Admin_Return_Cancellation_Requests.php?msg=order_deleted');
-    exit();
-}
 
-// Ensure table exists
-$create_table = "CREATE TABLE IF NOT EXISTS `return_refund_requests` (
-    `ID_Request` INT AUTO_INCREMENT PRIMARY KEY,
-    `ID_DonHang` INT NOT NULL,
-    `ID_KhachHang` INT NOT NULL,
-    `ID_SanPham` INT NOT NULL,
-    `ContactName` VARCHAR(255) NOT NULL,
-    `ContactPhone` VARCHAR(20) NOT NULL,
-    `ContactEmail` VARCHAR(255) NOT NULL,
-    `ContactAddress` TEXT NOT NULL,
-    `RefundReason` TEXT NOT NULL,
-    `Attachments` TEXT NULL,
-    `TrangThai` ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
-    `ThoiGianTao` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    `ThoiGianCapNhat` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_order (ID_DonHang),
-    INDEX idx_customer (ID_KhachHang),
-    INDEX idx_status (TrangThai)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-mysqli_query($conn, $create_table);
+    $orderId = filter_var($_POST['order_id'] ?? null, FILTER_VALIDATE_INT);
+    $goodsStatus = (string) ($_POST['goods_status'] ?? '');
+    if (!$orderId || !in_array($goodsStatus, ['returned', 'not_returned'], true)) {
+        return_admin_redirect('danger', 'Dữ liệu đơn hàng không hợp lệ.');
+    }
 
-// Get return/refund requests with product price and quantity
-$sql_requests = "SELECT r.*, d.TongTien, k.HoVaTen as CustomerName, sp.TenSanPham, sp.GiaTien as ProductPrice, dct.SoLuong as ProductQuantity
-                 FROM return_refund_requests r
-                 LEFT JOIN donhang d ON r.ID_DonHang = d.ID_DonHang
-                 LEFT JOIN khachhang k ON r.ID_KhachHang = k.ID_KhachHang
-                 LEFT JOIN sanpham sp ON r.ID_SanPham = sp.IDSanPham
-                 LEFT JOIN donhangchitiet dct ON dct.ID_DonHang = r.ID_DonHang AND dct.ID_SanPham = r.ID_SanPham
-                 ORDER BY r.ThoiGianTao DESC";
-$result_requests = mysqli_query($conn, $sql_requests);
+    try {
+        $conn->begin_transaction();
+        $orderStatement = $conn->prepare(
+            'SELECT ID_KhachHang, HoVaTen, GhiChu FROM donhang WHERE ID_DonHang = ? FOR UPDATE'
+        );
+        $orderStatement->bind_param('i', $orderId);
+        $orderStatement->execute();
+        $order = $orderStatement->get_result()->fetch_assoc();
+        if (!$order || stripos((string) ($order['GhiChu'] ?? ''), '[KHÁCH HÀNG TỪ CHỐI]') === false) {
+            throw new DomainException('Đơn hàng không tồn tại hoặc không thuộc nhóm khách từ chối nhận.');
+        }
 
-// Get canceled orders (including shipper-canceled orders - status = -1 OR GhiChu contains [ĐÃ HỦY] OR [KHÁCH HÀNG TỪ CHỐI])
-$sql_canceled = "SELECT d.*, k.HoVaTen, k.Email, k.SDT
-                 FROM donhang d
-                 LEFT JOIN khachhang k ON d.ID_KhachHang = k.ID_KhachHang
-                 WHERE (d.TrangThai = -1 OR d.GhiChu LIKE '%[ĐÃ HỦY]%' OR d.GhiChu LIKE '%[KHÁCH HÀNG TỪ CHỐI]%')
-                 ORDER BY d.ID_DonHang DESC
-                 LIMIT 50";
-$result_canceled = mysqli_query($conn, $sql_canceled);
+        $note = (string) ($order['GhiChu'] ?? '');
+        $wasReturned = stripos($note, '[ĐÃ TRẢ VỀ CỬA HÀNG]') !== false;
+        if ($goodsStatus === 'returned' && !$wasReturned) {
+            $note = trim($note . ' | [ĐÃ TRẢ VỀ CỬA HÀNG]');
+        } elseif ($goodsStatus === 'not_returned' && $wasReturned) {
+            $note = trim((string) preg_replace('/\s*\|?\s*\[ĐÃ TRẢ VỀ CỬA HÀNG\]/iu', '', $note));
+        }
+        $note = mb_substr($note, 0, 255);
+        $update = $conn->prepare('UPDATE donhang SET GhiChu = ? WHERE ID_DonHang = ?');
+        $update->bind_param('si', $note, $orderId);
+        $update->execute();
+        $conn->commit();
 
-// Get orders where customer refused delivery
-$sql_refused = "SELECT d.*, k.HoVaTen, k.Email, k.SDT, s.HoVaTen as ShipperName
-                FROM donhang d
-                LEFT JOIN khachhang k ON d.ID_KhachHang = k.ID_KhachHang
-                LEFT JOIN khachhang s ON d.ID_Shipper = s.ID_KhachHang
-                WHERE d.GhiChu LIKE '%[KHÁCH HÀNG TỪ CHỐI]%'
-                ORDER BY d.ID_DonHang DESC";
-$result_refused = mysqli_query($conn, $sql_refused);
-
-// Handle mark goods as returned/not returned (Admin action)
-if (isset($_GET['mark_returned']) && $_GET['mark_returned'] > 0 && $is_admin_or_manager) {
-    $order_id = intval($_GET['mark_returned']);
-    $status = isset($_GET['status']) ? $_GET['status'] : 'returned';
-    
-    // Get order info
-    $order_query = mysqli_query($conn, "SELECT GhiChu, ID_KhachHang, HoVaTen FROM donhang WHERE ID_DonHang = $order_id");
-    if ($order_query && mysqli_num_rows($order_query) > 0) {
-        $order_row = mysqli_fetch_array($order_query);
-        $current_ghi_chu = $order_row['GhiChu'] ?? '';
-        $customer_id = intval($order_row['ID_KhachHang']);
-        $customer_name = $order_row['HoVaTen'] ?? 'Khách hàng';
-        
-        if ($status === 'returned') {
-            // Mark as returned
-            if (stripos($current_ghi_chu, '[ĐÃ TRẢ VỀ CỬA HÀNG]') === false) {
-                $updated_ghi_chu = $current_ghi_chu . ' | [ĐÃ TRẢ VỀ CỬA HÀNG]';
-                $updated_ghi_chu_escaped = mysqli_real_escape_string($conn, $updated_ghi_chu);
-                mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu_escaped' WHERE ID_DonHang = $order_id");
-                
-                // Send notification to Admin and Staff
-                $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-                if (file_exists($wsPushFile)) {
-                    require_once($wsPushFile);
-                    if (function_exists('websocket_push')) {
-                        websocket_push(
-                            ['admin_channel', 'staff_channel'],
-                            [
-                                'type' => 'goods_returned_to_shop',
-                                'title' => 'Hàng đã hoàn về cửa hàng',
-                                'message' => "Đơn hàng #{$order_id} của khách hàng {$customer_name} - Shipper đã trả hàng về cửa hàng.",
-                                'sound' => 'notification',
-                                'data' => [
-                                    'order_id' => $order_id,
-                                    'customer_name' => $customer_name,
-                                    'customer_id' => $customer_id,
-                                    'status' => 'returned',
-                                    'timestamp' => date('Y-m-d H:i:s')
-                                ]
-                            ]
-                        );
-                    }
+        if ($goodsStatus === 'returned' && !$wasReturned) {
+            try {
+                $pushFile = dirname(__DIR__, 3) . '/WebSocketServer/WebSocket_Push.php';
+                if (is_file($pushFile)) {
+                    require_once $pushFile;
+                    websocket_push(['admin_channel', 'staff_channel'], [
+                        'type' => 'goods_returned_to_shop',
+                        'title' => 'Hàng đã hoàn về cửa hàng',
+                        'message' => sprintf(
+                            'Đơn hàng #%d của %s đã được xác nhận hoàn về cửa hàng.',
+                            $orderId,
+                            (string) ($order['HoVaTen'] ?? 'Khách hàng')
+                        ),
+                        'sound' => 'notification',
+                        'data' => ['order_id' => $orderId, 'customer_id' => (int) $order['ID_KhachHang']],
+                    ]);
                 }
+            } catch (Throwable $pushError) {
+                error_log('Returned goods realtime notification failed: ' . $pushError->getMessage());
             }
-        } else {
-            // Mark as not returned (remove the marker)
-            $updated_ghi_chu = str_ireplace('| [ĐÃ TRẢ VỀ CỬA HÀNG]', '', $current_ghi_chu);
-            $updated_ghi_chu = trim(preg_replace('/\s+\|\s+/', ' | ', $updated_ghi_chu));
-            $updated_ghi_chu_escaped = mysqli_real_escape_string($conn, $updated_ghi_chu);
-            mysqli_query($conn, "UPDATE donhang SET GhiChu = '$updated_ghi_chu_escaped' WHERE ID_DonHang = $order_id");
         }
+        return_admin_redirect(
+            'success',
+            $goodsStatus === 'returned' ? 'Đã xác nhận hàng hoàn về cửa hàng.' : 'Đã chuyển trạng thái sang chưa hoàn về cửa hàng.'
+        );
+    } catch (Throwable $error) {
+        $conn->rollback();
+        error_log('Update returned goods status failed: ' . $error->getMessage());
+        return_admin_redirect('danger', 'Không thể cập nhật trạng thái hàng hoàn.');
     }
-    
-    header('Location: Admin_Return_Cancellation_Requests.php?msg=' . ($status === 'returned' ? 'marked_returned' : 'marked_not_returned'));
-    exit();
 }
-?>
 
+$requestResult = $conn->query(
+    "SELECT r.*, d.TongTien, k.HoVaTen AS CustomerName,
+            sp.TenSanPham, COALESCE(dct.DonGia, sp.GiaTien, 0) AS ProductPrice,
+            COALESCE(dct.SoLuong, 0) AS ProductQuantity,
+            COALESCE(dct.ThanhTienThucTra, 0) AS ThanhTienThucTra
+     FROM return_refund_requests r
+     LEFT JOIN donhang d ON r.ID_DonHang = d.ID_DonHang
+     LEFT JOIN khachhang k ON r.ID_KhachHang = k.ID_KhachHang
+     LEFT JOIN sanpham sp ON r.ID_SanPham = sp.IDSanPham
+     LEFT JOIN donhangchitiet dct ON dct.ID_DonHang = r.ID_DonHang AND dct.ID_SanPham = r.ID_SanPham
+     ORDER BY r.ThoiGianTao DESC"
+);
+$requests = $requestResult->fetch_all(MYSQLI_ASSOC);
+
+$refusedResult = $conn->query(
+    "SELECT d.*, k.HoVaTen, k.Email, k.SDT, s.HoVaTen AS ShipperName
+     FROM donhang d
+     LEFT JOIN khachhang k ON d.ID_KhachHang = k.ID_KhachHang
+     LEFT JOIN khachhang s ON d.ID_Shipper = s.ID_KhachHang
+     WHERE d.GhiChu LIKE '%[KHÁCH HÀNG TỪ CHỐI]%'
+     ORDER BY d.ID_DonHang DESC"
+);
+$refusedOrders = $refusedResult->fetch_all(MYSQLI_ASSOC);
+
+$statusMeta = [
+    'pending' => ['Chờ xử lý', 'warning', 'fa-clock'],
+    'approved' => ['Đã chấp nhận', 'success', 'fa-check-circle'],
+    'rejected' => ['Đã từ chối', 'danger', 'fa-times-circle'],
+];
+$summary = ['all' => count($requests), 'pending' => 0, 'approved' => 0, 'rejected' => 0];
+foreach ($requests as $request) {
+    $key = (string) ($request['TrangThai'] ?? 'pending');
+    if (isset($summary[$key])) {
+        $summary[$key]++;
+    }
+}
+$flash = $_SESSION['return_admin_flash'] ?? null;
+unset($_SESSION['return_admin_flash']);
+
+include __DIR__ . '/../Layouts/headHTML.php';
+?>
+<style>
+    .return-page { color: #3a3b45; }
+    .return-page-header { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:1.4rem; }
+    .return-page-header h1 { font-size:1.7rem; font-weight:700; margin:0 0 .35rem; }
+    .return-page-header p { margin:0; color:#858796; }
+    .return-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1rem; margin-bottom:1.5rem; }
+    .return-summary-card { background:#fff; border-radius:.8rem; padding:1rem 1.15rem; box-shadow:0 .15rem 1rem rgba(58,59,69,.08); border-left:4px solid #4e73df; }
+    .return-summary-card.warning { border-left-color:#f6c23e; }
+    .return-summary-card.success { border-left-color:#1cc88a; }
+    .return-summary-card.danger { border-left-color:#e74a3b; }
+    .return-summary-card small { display:block; color:#858796; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+    .return-summary-card strong { display:block; font-size:1.55rem; line-height:1.25; margin-top:.2rem; }
+    .return-section { background:#fff; border-radius:.9rem; box-shadow:0 .15rem 1.35rem rgba(58,59,69,.09); margin-bottom:1.5rem; overflow:hidden; }
+    .return-section-header { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:1rem 1.25rem; border-bottom:1px solid #eaecf4; }
+    .return-section-header h2 { font-size:1.05rem; font-weight:800; margin:0; }
+    .return-list { padding:1rem; display:grid; gap:.85rem; }
+    .return-request-card { border:1px solid #e3e6f0; border-radius:.75rem; padding:1rem 1.1rem; transition:box-shadow .2s,border-color .2s; }
+    .return-request-card:hover { border-color:#b8c5f2; box-shadow:0 .25rem .8rem rgba(78,115,223,.1); }
+    .return-card-top { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:.85rem; }
+    .return-identity { display:flex; align-items:center; flex-wrap:wrap; gap:.5rem; }
+    .return-code { font-size:1rem; color:#4e73df; font-weight:800; }
+    .return-date { color:#858796; font-size:.82rem; white-space:nowrap; }
+    .return-card-grid { display:grid; grid-template-columns:minmax(180px,1.05fr) minmax(240px,1.8fr) minmax(150px,.75fr) auto; gap:1rem; align-items:center; }
+    .return-field-label { display:block; color:#858796; font-size:.72rem; font-weight:800; text-transform:uppercase; letter-spacing:.035em; margin-bottom:.25rem; }
+    .return-field-value { font-weight:600; overflow-wrap:anywhere; }
+    .return-product { color:#5a5c69; line-height:1.4; }
+    .return-reason { color:#5a5c69; line-height:1.45; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .return-money { font-size:1.05rem; font-weight:800; color:#1cc88a; white-space:nowrap; }
+    .return-money small { display:block; color:#858796; font-size:.72rem; font-weight:500; white-space:normal; margin-top:.2rem; }
+    .return-action { white-space:nowrap; }
+    .return-empty { text-align:center; color:#858796; padding:3rem 1rem; }
+    .return-empty i { display:block; font-size:2.4rem; color:#d1d3e2; margin-bottom:.8rem; }
+    .refused-list { padding:1rem; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
+    .refused-card { border:1px solid #e3e6f0; border-radius:.75rem; padding:1rem; }
+    .refused-card-head { display:flex; justify-content:space-between; align-items:center; gap:.75rem; margin-bottom:.8rem; }
+    .refused-meta { display:grid; grid-template-columns:1fr 1fr; gap:.75rem; margin-bottom:.8rem; }
+    .refused-reason { background:#fff8e1; border-radius:.5rem; padding:.7rem .8rem; color:#7a6218; margin-bottom:.8rem; }
+    .refused-actions { display:flex; flex-wrap:wrap; gap:.5rem; }
+    @media (max-width:1200px) {
+        .return-card-grid { grid-template-columns:1fr 1.5fr; }
+        .return-action { white-space:normal; }
+    }
+    @media (max-width:768px) {
+        .return-page-header { display:block; }
+        .return-summary { grid-template-columns:repeat(2,1fr); }
+        .return-card-top,.return-section-header { align-items:flex-start; }
+        .return-card-grid,.refused-list,.refused-meta { grid-template-columns:1fr; }
+        .return-date { white-space:normal; }
+    }
+</style>
 <body id="page-top">
-    <div id="wrapper">
-        <?php include("../Layouts/SlideBar.php"); ?>
-        
-        <div id="content-wrapper" class="d-flex flex-column">
-            <div id="content">
-                <?php include("../Layouts/TopBar.php"); ?>
-                
-                <div class="container-fluid">
-                    <h1 class="h3 mb-4 text-gray-800">
-                        <i class="fas fa-undo me-2"></i>Yêu Cầu Hoàn Trả / Hủy Đơn Hàng
-                    </h1>
-                    
-                    <!-- Return/Refund Requests -->
-                    <div class="card shadow mb-4">
-                        <div class="card-header py-3">
-                            <h6 class="m-0 font-weight-bold text-primary">Yêu Cầu Hoàn Trả</h6>
-                        </div>
-                        <div class="card-body">
-                            <div class="table-responsive">
-                                <table class="table table-bordered" width="100%" cellspacing="0">
-                                    <thead>
-                                        <tr>
-                                            <th>Mã YC</th>
-                                            <th>Mã ĐH</th>
-                                            <th>Khách Hàng</th>
-                                            <th>Sản Phẩm</th>
-                                            <th>Tổng Tiền</th>
-                                            <th>Lý Do</th>
-                                            <th>Trạng Thái</th>
-                                            <th>Ngày Tạo</th>
-                                            <th>Thao Tác</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php 
-                                        if ($result_requests && mysqli_num_rows($result_requests) > 0):
-                                            while ($row = mysqli_fetch_array($result_requests)):
-                                                $status = $row['TrangThai'];
-                                                $status_class = ($status == 'pending') ? 'warning' : (($status == 'approved') ? 'success' : 'danger');
-                                                $status_text = ($status == 'pending') ? 'Chờ xử lý' : (($status == 'approved') ? 'Đã chấp nhận' : 'Đã từ chối');
-                                                $refund_reason_short = mb_substr($row['RefundReason'], 0, 50) . (mb_strlen($row['RefundReason']) > 50 ? '...' : '');
-                                                $created_date = isset($row['ThoiGianTao']) ? date('d/m/Y H:i', strtotime($row['ThoiGianTao'])) : 'N/A';
-                                        ?>
-                                            <tr>
-                                                <td><strong>#<?php echo $row['ID_Request']; ?></strong></td>
-                                                <td><strong>#<?php echo $row['ID_DonHang']; ?></strong></td>
-                                                <td><?php echo htmlspecialchars($row['CustomerName']); ?></td>
-                                                <td><?php echo htmlspecialchars($row['TenSanPham']); ?></td>
-                                                <td>
-                                                    <?php 
-                                                    // Calculate refund amount based on product only
-                                                    $product_price = intval($row['ProductPrice'] ?? 0);
-                                                    $product_quantity = intval($row['ProductQuantity'] ?? 0);
-                                                    $refund_amount = $product_price * $product_quantity;
-                                                    echo number_format($refund_amount, 0, ',', '.'); ?> đ
-                                                    <small class="text-muted d-block">(Sản phẩm: <?php echo number_format($product_price, 0, ',', '.'); ?> đ × <?php echo $product_quantity; ?>)</small>
-                                                </td>
-                                                <td title="<?php echo htmlspecialchars($row['RefundReason']); ?>">
-                                                    <?php echo htmlspecialchars($refund_reason_short); ?>
-                                                </td>
-                                                <td>
-                                                    <span class="badge bg-<?php echo $status_class; ?>">
-                                                        <?php echo $status_text; ?>
-                                                    </span>
-                                                </td>
-                                                <td><?php echo $created_date; ?></td>
-                                                <td>
-                                                    <a href="Admin_Return_Refund_Detail.php?request_id=<?php echo $row['ID_Request']; ?>" 
-                                                       class="btn btn-sm btn-info">
-                                                        <i class="fas fa-eye"></i> Chi tiết
-                                                    </a>
-                                                    <?php if (($status == 'rejected' || $status == 'approved') && $is_admin_or_manager): ?>
-                                                        <a href="?delete_request=<?php echo $row['ID_Request']; ?>" 
-                                                           class="btn btn-sm btn-danger"
-                                                           onclick="return confirm('Bạn có chắc muốn xóa yêu cầu này?');">
-                                                            <i class="fas fa-trash"></i> Xóa
-                                                        </a>
-                                                    <?php endif; ?>
-                                                </td>
-                                            </tr>
-                                        <?php 
-                                            endwhile;
-                                        else:
-                                        ?>
-                                            <tr>
-                                                <td colspan="9" class="text-center text-muted py-4">
-                                                    <i class="fas fa-inbox fa-2x mb-2"></i><br>
-                                                    Không có yêu cầu hoàn trả nào
-                                                </td>
-                                            </tr>
-                                        <?php endif; ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
+<div id="wrapper">
+    <?php include __DIR__ . '/../Layouts/SlideBar.php'; ?>
+    <div id="content-wrapper" class="d-flex flex-column">
+        <div id="content">
+            <?php include __DIR__ . '/../Layouts/TopBar.php'; ?>
+            <main class="container-fluid return-page pb-5">
+                <div class="return-page-header">
+                    <div>
+                        <h1><i class="fas fa-undo-alt text-primary mr-2"></i>Yêu cầu hoàn trả & hủy đơn</h1>
+                        <p>Theo dõi, kiểm tra và xử lý yêu cầu hậu mãi của khách hàng.</p>
                     </div>
-                    
-                    <!-- Customer Refused Delivery Section -->
-                    <div class="card shadow mb-4">
-                        <div class="card-header py-3 bg-warning">
-                            <h6 class="m-0 font-weight-bold">Đơn Hàng Khách Hàng Từ Chối Nhận (Shipper Đã Hủy)</h6>
-                        </div>
-                        <div class="card-body">
-                            <div class="table-responsive">
-                                <table class="table table-bordered" width="100%" cellspacing="0">
-                                    <thead>
-                                        <tr>
-                                            <th>Mã ĐH</th>
-                                            <th>Khách Hàng</th>
-                                            <th>Shipper</th>
-                                            <th>Lý Do Từ Chối</th>
-                                            <th>Trạng Thái Hàng</th>
-                                            <th>Thao Tác</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <?php 
-                                        if ($result_refused && mysqli_num_rows($result_refused) > 0):
-                                            while ($row = mysqli_fetch_array($result_refused)):
-                                                $ghi_chu = $row['GhiChu'] ?? '';
-                                                $refusal_reason = 'Không có lý do';
-                                                if (preg_match('/\[KHÁCH HÀNG TỪ CHỐI\]\s*Lý do:\s*(.+?)(?:\||$)/i', $ghi_chu, $matches)) {
-                                                    $refusal_reason = trim($matches[1]);
-                                                }
-                                                $returned_to_shop = (stripos($ghi_chu, '[ĐÃ TRẢ VỀ CỬA HÀNG]') !== false);
-                                        ?>
-                                            <tr>
-                                                <td><strong>#<?php echo $row['ID_DonHang']; ?></strong></td>
-                                                <td>
-                                                    <?php echo htmlspecialchars($row['HoVaTen']); ?><br>
-                                                    <small class="text-muted"><?php echo htmlspecialchars($row['SDT']); ?></small>
-                                                </td>
-                                                <td><?php echo htmlspecialchars($row['ShipperName'] ?? 'N/A'); ?></td>
-                                                <td>
-                                                    <span class="text-danger" title="<?php echo htmlspecialchars($refusal_reason); ?>">
-                                                        <?php echo htmlspecialchars(mb_substr($refusal_reason, 0, 50)) . (mb_strlen($refusal_reason) > 50 ? '...' : ''); ?>
-                                                    </span>
-                                                </td>
-                                                <td>
-                                                    <?php if ($returned_to_shop): ?>
-                                                        <span class="badge bg-success">Đã trả về cửa hàng</span>
-                                                    <?php else: ?>
-                                                        <span class="badge bg-warning">Chưa trả về cửa hàng</span>
-                                                    <?php endif; ?>
-                                                </td>
-                                                <td>
-                                                    <a href="../Oders/View_Oder_Detail.php?oder_id=<?php echo $row['ID_DonHang']; ?>&view=all" 
-                                                       class="btn btn-sm btn-info mb-1">
-                                                        <i class="fas fa-eye"></i> Chi tiết
-                                                    </a>
-                                                    <?php if ($is_admin_or_manager): ?>
-                                                        <?php if (!$returned_to_shop): ?>
-                                                            <a href="?mark_returned=<?php echo $row['ID_DonHang']; ?>&status=returned" 
-                                                               class="btn btn-sm btn-success mb-1"
-                                                               onclick="return confirm('Xác nhận shipper đã trả hàng về cửa hàng?');">
-                                                                <i class="fas fa-check-circle"></i> Đã hoàn về shop
-                                                            </a>
-                                                            <a href="?mark_returned=<?php echo $row['ID_DonHang']; ?>&status=not_returned" 
-                                                               class="btn btn-sm btn-warning"
-                                                               onclick="return confirm('Xác nhận hàng chưa được trả về cửa hàng?');">
-                                                                <i class="fas fa-times-circle"></i> Chưa hoàn về shop
-                                                            </a>
-                                                        <?php else: ?>
-                                                            <span class="badge bg-success">Đã hoàn về shop</span>
-                                                            <!-- Don't show "Not Yet Returned" button when already returned -->
-                                                        <?php endif; ?>
-                                                    <?php endif; ?>
-                                                </td>
-                                            </tr>
-                                        <?php 
-                                            endwhile;
-                                        else:
-                                        ?>
-                                            <tr>
-                                                <td colspan="6" class="text-center text-muted py-4">
-                                                    <i class="fas fa-inbox fa-2x mb-2"></i><br>
-                                                    Không có đơn hàng nào khách hàng từ chối
-                                                </td>
-                                            </tr>
-                                        <?php endif; ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
+                    <a class="btn btn-light border" href="All_Oders.php"><i class="fas fa-arrow-left mr-1"></i>Danh sách đơn hàng</a>
                 </div>
-            </div>
+
+                <?php if (is_array($flash)): ?>
+                    <div class="alert alert-<?php echo return_admin_h($flash[0]); ?> alert-dismissible fade show" role="alert">
+                        <?php echo return_admin_h($flash[1]); ?>
+                        <button class="close" data-dismiss="alert" aria-label="Đóng"><span>&times;</span></button>
+                    </div>
+                <?php endif; ?>
+
+                <div class="return-summary">
+                    <div class="return-summary-card"><small>Tổng yêu cầu</small><strong><?php echo $summary['all']; ?></strong></div>
+                    <div class="return-summary-card warning"><small>Chờ xử lý</small><strong><?php echo $summary['pending']; ?></strong></div>
+                    <div class="return-summary-card success"><small>Đã chấp nhận</small><strong><?php echo $summary['approved']; ?></strong></div>
+                    <div class="return-summary-card danger"><small>Đã từ chối</small><strong><?php echo $summary['rejected']; ?></strong></div>
+                </div>
+
+                <section class="return-section">
+                    <div class="return-section-header">
+                        <h2><i class="fas fa-box-open text-primary mr-2"></i>Yêu cầu hoàn trả</h2>
+                        <span class="badge badge-light border px-3 py-2"><?php echo count($requests); ?> yêu cầu</span>
+                    </div>
+                    <?php if ($requests === []): ?>
+                        <div class="return-empty"><i class="fas fa-inbox"></i>Chưa có yêu cầu hoàn trả nào.</div>
+                    <?php else: ?>
+                        <div class="return-list">
+                        <?php foreach ($requests as $request):
+                            $status = (string) ($request['TrangThai'] ?? 'pending');
+                            [$statusText, $statusClass, $statusIcon] = $statusMeta[$status] ?? $statusMeta['pending'];
+                            $productName = trim((string) ($request['TenSanPham'] ?? ''));
+                            $customerName = trim((string) ($request['CustomerName'] ?? ''));
+                            $reason = trim((string) ($request['RefundReason'] ?? ''));
+                            $price = max(0, (int) ($request['ProductPrice'] ?? 0));
+                            $quantity = max(0, (int) ($request['SoLuongYeuCau'] ?? 0));
+                            $refundAmount = return_refund_preview_amount($request);
+                            $createdAt = strtotime((string) ($request['ThoiGianTao'] ?? ''));
+                        ?>
+                            <article class="return-request-card">
+                                <div class="return-card-top">
+                                    <div class="return-identity">
+                                        <span class="return-code">YC #<?php echo (int) $request['ID_Request']; ?></span>
+                                        <span class="text-muted">•</span>
+                                        <span class="font-weight-bold">Đơn #<?php echo (int) $request['ID_DonHang']; ?></span>
+                                        <span class="badge badge-<?php echo $statusClass; ?> px-2 py-1"><i class="fas <?php echo $statusIcon; ?> mr-1"></i><?php echo $statusText; ?></span>
+                                    </div>
+                                    <time class="return-date"><i class="far fa-calendar-alt mr-1"></i><?php echo $createdAt ? date('d/m/Y H:i', $createdAt) : 'Chưa xác định'; ?></time>
+                                </div>
+                                <div class="return-card-grid">
+                                    <div><span class="return-field-label">Khách hàng</span><div class="return-field-value"><i class="far fa-user text-muted mr-1"></i><?php echo return_admin_h($customerName !== '' ? $customerName : 'Không còn dữ liệu'); ?></div></div>
+                                    <div><span class="return-field-label">Sản phẩm & lý do</span><div class="return-product"><?php echo return_admin_h($productName !== '' ? $productName : 'Sản phẩm không còn tồn tại'); ?></div><div class="return-reason mt-1" title="<?php echo return_admin_h($reason); ?>"><i class="far fa-comment-dots text-muted mr-1"></i><?php echo return_admin_h($reason !== '' ? $reason : 'Khách hàng chưa mô tả lý do'); ?></div></div>
+                                    <div><span class="return-field-label">Số tiền dự kiến</span><div class="return-money"><?php echo number_format($refundAmount, 0, ',', '.'); ?> đ<small><?php echo number_format($price, 0, ',', '.'); ?> đ × <?php echo $quantity; ?></small></div></div>
+                                    <div class="return-action"><a href="Admin_Return_Refund_Detail.php?request_id=<?php echo (int) $request['ID_Request']; ?>" class="btn btn-primary btn-sm px-3"><i class="fas fa-eye mr-1"></i>Xem chi tiết</a></div>
+                                </div>
+                            </article>
+                        <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </section>
+
+                <section class="return-section">
+                    <div class="return-section-header">
+                        <h2><i class="fas fa-truck-loading text-warning mr-2"></i>Khách từ chối nhận hàng</h2>
+                        <span class="badge badge-warning px-3 py-2"><?php echo count($refusedOrders); ?> đơn</span>
+                    </div>
+                    <?php if ($refusedOrders === []): ?>
+                        <div class="return-empty"><i class="fas fa-box"></i>Không có đơn hàng nào khách từ chối nhận.</div>
+                    <?php else: ?>
+                        <div class="refused-list">
+                        <?php foreach ($refusedOrders as $order):
+                            $note = (string) ($order['GhiChu'] ?? '');
+                            $reason = 'Không có lý do cụ thể';
+                            if (preg_match('/\[KHÁCH HÀNG TỪ CHỐI\]\s*Lý do:\s*(.+?)(?:\||$)/iu', $note, $matches)) {
+                                $reason = trim($matches[1]);
+                            }
+                            $returned = stripos($note, '[ĐÃ TRẢ VỀ CỬA HÀNG]') !== false;
+                        ?>
+                            <article class="refused-card">
+                                <div class="refused-card-head"><strong class="text-primary">Đơn #<?php echo (int) $order['ID_DonHang']; ?></strong><span class="badge badge-<?php echo $returned ? 'success' : 'warning'; ?>"><?php echo $returned ? 'Đã hoàn về shop' : 'Chưa hoàn về shop'; ?></span></div>
+                                <div class="refused-meta">
+                                    <div><span class="return-field-label">Khách hàng</span><div class="return-field-value"><?php echo return_admin_h($order['HoVaTen'] ?? 'Không còn dữ liệu'); ?></div><small class="text-muted"><?php echo return_admin_h($order['SDT'] ?? ''); ?></small></div>
+                                    <div><span class="return-field-label">Shipper</span><div class="return-field-value"><?php echo return_admin_h($order['ShipperName'] ?? 'Chưa xác định'); ?></div></div>
+                                </div>
+                                <div class="refused-reason"><strong>Lý do:</strong> <?php echo return_admin_h($reason); ?></div>
+                                <div class="refused-actions">
+                                    <a href="View_Oder_Detail.php?oder_id=<?php echo (int) $order['ID_DonHang']; ?>&view=all" class="btn btn-sm btn-outline-primary"><i class="fas fa-eye mr-1"></i>Chi tiết đơn</a>
+                                    <form method="post" class="d-inline" onsubmit="return confirm('<?php echo $returned ? 'Chuyển hàng về trạng thái chưa hoàn về shop?' : 'Xác nhận hàng đã được hoàn về cửa hàng?'; ?>');">
+                                        <?php echo csrf_field(); ?>
+                                        <input type="hidden" name="action" value="mark_returned">
+                                        <input type="hidden" name="order_id" value="<?php echo (int) $order['ID_DonHang']; ?>">
+                                        <input type="hidden" name="goods_status" value="<?php echo $returned ? 'not_returned' : 'returned'; ?>">
+                                        <button class="btn btn-sm btn-<?php echo $returned ? 'outline-warning' : 'success'; ?>"><i class="fas <?php echo $returned ? 'fa-undo' : 'fa-check-circle'; ?> mr-1"></i><?php echo $returned ? 'Đánh dấu chưa hoàn' : 'Xác nhận đã hoàn'; ?></button>
+                                    </form>
+                                </div>
+                            </article>
+                        <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </section>
+            </main>
         </div>
     </div>
-    
-    <!-- Scroll to Top Button-->
-    <a class="scroll-to-top rounded" href="#page-top">
-        <i class="fas fa-angle-up"></i>
-    </a>
-    
-    <?php include("../Layouts/Link.php"); ?>
+</div>
+<a class="scroll-to-top rounded" href="#page-top"><i class="fas fa-angle-up"></i></a>
+<?php include __DIR__ . '/../Layouts/Link.php'; ?>
 </body>
 </html>
-
-<?php
-// Handle delete request
-if (isset($_GET['delete_request']) && $_GET['delete_request'] > 0) {
-    $request_id = intval($_GET['delete_request']);
-    mysqli_query($conn, "DELETE FROM return_refund_requests WHERE ID_Request = $request_id AND TrangThai = 'rejected'");
-    header('Location: Admin_Return_Cancellation_Requests.php?msg=deleted');
-    exit();
-}
-?>
-

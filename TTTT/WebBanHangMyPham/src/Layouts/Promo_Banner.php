@@ -6,22 +6,15 @@
 
 // Get customer status if logged in
 $customerLabel = 'normal';
-$weeklyPurchase = 0;
-$discountPercent = 0;
-$amountNeeded = 5000000;
 
 if (isset($_SESSION['IDNguoiDung'])) {
     try {
-        $dsn = "mysql:host=127.0.0.1;dbname=webmipham1;charset=utf8mb4";
-        $pdoBanner = new PDO($dsn, "root", "", [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-        $stmt = $pdoBanner->prepare("SELECT customer_label, total_weekly_purchase, discount_percent FROM khachhang WHERE ID_KhachHang = ?");
+        $pdoBanner = app_pdo();
+        $stmt = $pdoBanner->prepare("SELECT customer_label,customer_value_tier FROM khachhang WHERE ID_KhachHang = ?");
         $stmt->execute([$_SESSION['IDNguoiDung']]);
         $custData = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($custData) {
             $customerLabel = $custData['customer_label'] ?? 'normal';
-            $weeklyPurchase = (int)($custData['total_weekly_purchase'] ?? 0);
-            $discountPercent = (int)($custData['discount_percent'] ?? 0);
-            $amountNeeded = max(0, 5000000 - $weeklyPurchase);
         }
     } catch (Exception $e) {
         // Silently fail
@@ -41,10 +34,9 @@ $isPotential = ($customerLabel === 'potential');
         <div class="promo-content">
             <div class="promo-icon">⭐</div>
             <div class="promo-text">
-                <div class="promo-title">🎉 Chúc mừng! Bạn là Khách hàng Tiềm năng!</div>
+                <div class="promo-title">Sẵn sàng hỗ trợ nhu cầu của bạn</div>
                 <div class="promo-desc">
-                    Bạn đang được giảm <strong><?php echo $discountPercent; ?>%</strong> cho tất cả đơn hàng. 
-                    Tiếp tục mua sắm để duy trì ưu đãi đặc biệt này!
+                    Bạn đang có nhu cầu mua sắm rõ ràng. Mơ Shop sẽ ưu tiên hỗ trợ tư vấn sản phẩm phù hợp.
                 </div>
             </div>
             <a href="View_Product.php" class="promo-btn">Mua sắm ngay</a>
@@ -55,26 +47,15 @@ $isPotential = ($customerLabel === 'potential');
         <div class="promo-content">
             <div class="promo-icon">🛍️</div>
             <div class="promo-text">
-                <div class="promo-title">🌟 Trở thành Khách hàng Tiềm năng - Nhận ưu đãi 20%!</div>
+                <div class="promo-title">Khám phá sản phẩm phù hợp với bạn</div>
                 <div class="promo-desc">
-                    Khách hàng mua trên <strong>5.000.000 VND</strong> trong tuần sẽ trở thành Khách hàng Tiềm năng 
-                    và được <strong>giảm 20%</strong> cho tuần tiếp theo!
-                    <?php if ($weeklyPurchase > 0): ?>
-                    <br><span class="promo-progress">Bạn đã mua: <?php echo number_format($weeklyPurchase, 0, ',', '.'); ?> VND | Còn thiếu: <?php echo number_format($amountNeeded, 0, ',', '.'); ?> VND</span>
-                    <?php endif; ?>
+                    Tìm kiếm mỹ phẩm theo loại da, nhu cầu và ngân sách của bạn.
                 </div>
             </div>
             <a href="View_Product.php" class="promo-btn pulse-animation">Mua ngay!</a>
         </div>
         <?php endif; ?>
         
-        <!-- Progress bar for non-potential customers -->
-        <?php if (!$isPotential && isset($_SESSION['IDNguoiDung'])): ?>
-        <div class="promo-progress-bar">
-            <div class="promo-progress-fill" style="width: <?php echo min(100, ($weeklyPurchase / 5000000) * 100); ?>%;"></div>
-            <div class="promo-progress-text"><?php echo round(($weeklyPurchase / 5000000) * 100); ?>% đạt mục tiêu</div>
-        </div>
-        <?php endif; ?>
     </div>
 </div>
 
@@ -280,4 +261,3 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 </script>
-

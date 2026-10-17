@@ -1,25 +1,17 @@
 <?php
 include("../DB_Connect.php");
-session_start();
-
-// Create contact_messages table if not exists
-@mysqli_query($conn, "CREATE TABLE IF NOT EXISTS `contact_messages` (
-    `ID_LienHe` INT AUTO_INCREMENT PRIMARY KEY,
-    `HoTen` VARCHAR(255) NOT NULL,
-    `Email` VARCHAR(255) NOT NULL,
-    `SoDienThoai` VARCHAR(20) NULL,
-    `NoiDung` TEXT NOT NULL,
-    `TrangThai` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '0: Chưa xử lý, 1: Đã xử lý',
-    `ThoiGianTao` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_trangthai (`TrangThai`),
-    INDEX idx_thoigian (`ThoiGianTao`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+require_once dirname(__DIR__, 3) . '/config/security.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ho_ten']) && isset($_POST['email']) && isset($_POST['noi_dung'])) {
-    $ho_ten = mysqli_real_escape_string($conn, $_POST['ho_ten']);
-    $email = mysqli_real_escape_string($conn, $_POST['email']);
-    $sdt = isset($_POST['sdt']) ? mysqli_real_escape_string($conn, $_POST['sdt']) : '';
-    $noi_dung = mysqli_real_escape_string($conn, $_POST['noi_dung']);
+    require_csrf();
+    if (!auth_rate_limit('contact', 5, 900)) {
+        header('Location: ../View/View_contact.php?error=rate_limited', true, 303);
+        exit();
+    }
+    $ho_ten = trim((string) $_POST['ho_ten']);
+    $email = strtolower(trim((string) $_POST['email']));
+    $sdt = trim((string) ($_POST['sdt'] ?? ''));
+    $noi_dung = trim((string) $_POST['noi_dung']);
     
     // Validate email
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -28,16 +20,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ho_ten']) && isset($_
     }
     
     // Insert contact message
-    $sql = "INSERT INTO `contact_messages` (`HoTen`, `Email`, `SoDienThoai`, `NoiDung`) 
-            VALUES ('$ho_ten', '$email', '$sdt', '$noi_dung')";
-    
-    $result = mysqli_query($conn, $sql);
+    if ($ho_ten === '' || mb_strlen($ho_ten) > 255 || mb_strlen($sdt) > 20 || $noi_dung === '' || mb_strlen($noi_dung) > 5000) {
+        header('Location: ../View/View_contact.php?error=1', true, 303);
+        exit();
+    }
+    $statement = $conn->prepare('INSERT INTO contact_messages (HoTen, Email, SoDienThoai, NoiDung) VALUES (?, ?, ?, ?)');
+    $statement->bind_param('ssss', $ho_ten, $email, $sdt, $noi_dung);
+    $result = $statement->execute();
     
     if ($result) {
-        header('Location: ../View/View_contact.php?success=1');
+        header('Location: ../View/View_contact.php?success=1', true, 303);
         exit();
     } else {
-        header('Location: ../View/View_contact.php?error=1');
+        header('Location: ../View/View_contact.php?error=1', true, 303);
         exit();
     }
 } else {

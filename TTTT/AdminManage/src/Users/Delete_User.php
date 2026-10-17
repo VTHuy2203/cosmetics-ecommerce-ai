@@ -1,86 +1,81 @@
 <?php
-// Delete_User.php
+declare(strict_types=1);
+
 header('Content-Type: application/json; charset=utf-8');
+require_once dirname(__DIR__, 3) . '/config/security.php';
+require_once __DIR__ . '/../DB_Connect.php';
 
-// Start session if not already started
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    json_response(['ok' => false, 'error' => 'method_not_allowed'], 405);
 }
-
-// Admin panel - allow if user has any session (IDNguoiDung, is_admin, or user)
-// This is a separate admin page, so we'll be more lenient with authentication
-$is_logged_in = isset($_SESSION['IDNguoiDung']) || 
-                isset($_SESSION['is_admin']) || 
-                isset($_SESSION['user']) ||
-                isset($_SESSION['admin_id']);
-
-// If no session at all, still allow but log it (for development/debugging)
-// In production, you might want to enable this check
-if (!$is_logged_in && false) { // Set to true to enable strict check
-    echo json_encode(["ok" => false, "error" => "Unauthorized - Please login first"]);
-    exit;
+if (!isset($_SESSION['admin_id']) || !in_array($_SESSION['admin_role'] ?? '', ['admin', 'manager'], true)) {
+    json_response(['ok' => false, 'error' => 'Bạn không có quyền xóa khách hàng.'], 403);
 }
+require_csrf(true);
 
-include("../DB_Connect.php");
-
-$user_id = isset($_POST['user_id']) ? (int)$_POST['user_id'] : 0;
-if ($user_id <= 0) {
-    echo json_encode(["ok" => false, "error" => "Invalid user ID"]);
-    exit;
+$userId = filter_input(INPUT_POST, 'user_id', FILTER_VALIDATE_INT);
+if (!$userId || $userId <= 0) {
+    json_response(['ok' => false, 'error' => 'Mã khách hàng không hợp lệ.'], 422);
 }
 
 try {
-    // Get user info BEFORE deletion for notification
-    $user_info = mysqli_fetch_assoc(mysqli_query($conn, "SELECT HoVaTen FROM khachhang WHERE ID_KhachHang = $user_id"));
-    $user_name = $user_info ? $user_info['HoVaTen'] : 'Unknown';
-    
-    // Check if user is a shipper (exclude shippers from notification)
-    $check_shipper = mysqli_query($conn, "SELECT COUNT(*) AS c FROM shipper_requests WHERE user_id = $user_id");
-    $is_shipper = false;
-    if ($check_shipper) {
-        $shipper_row = mysqli_fetch_assoc($check_shipper);
-        $is_shipper = intval($shipper_row['c']) > 0;
+    $customer = $conn->prepare('SELECT HoVaTen, Role FROM khachhang WHERE ID_KhachHang = ? LIMIT 1');
+    $customer->bind_param('i', $userId);
+    $customer->execute();
+    $record = $customer->get_result()->fetch_assoc();
+    if (!$record) {
+        json_response(['ok' => false, 'error' => 'Không tìm thấy khách hàng.'], 404);
     }
-    
-    // Start transaction
-    mysqli_begin_transaction($conn);
-    
-    // Delete from related tables first
-    mysqli_query($conn, "DELETE FROM chat_messages WHERE user_id = $user_id");
-    mysqli_query($conn, "DELETE FROM chat_appointments WHERE user_id = $user_id");
-    mysqli_query($conn, "DELETE FROM chat_logs WHERE user_id = $user_id");
-    mysqli_query($conn, "DELETE FROM leads WHERE user_id = $user_id");
-    mysqli_query($conn, "DELETE FROM lead_events WHERE user_id = $user_id");
-    mysqli_query($conn, "DELETE FROM lead_scores WHERE user_id = $user_id");
-    mysqli_query($conn, "DELETE FROM customer_needs WHERE user_id = $user_id");
-    mysqli_query($conn, "DELETE FROM nap_tien WHERE ID_KhachHang = $user_id");
-    
-    // Delete the user
-    $result = mysqli_query($conn, "DELETE FROM khachhang WHERE ID_KhachHang = $user_id");
-    
-    if ($result && mysqli_affected_rows($conn) > 0) {
-        mysqli_commit($conn);
-        
-        // Send WebSocket notification to Staff (only for customers, not shippers)
-        if (!$is_shipper) {
-            $wsPushFile = dirname(dirname(dirname(__DIR__))) . DIRECTORY_SEPARATOR . 'WebSocketServer' . DIRECTORY_SEPARATOR . 'WebSocket_Push.php';
-            if (file_exists($wsPushFile)) {
-                require_once($wsPushFile);
-                if (function_exists('websocket_push_customer_update')) {
-                    websocket_push_customer_update($user_id, $user_name, 'delete');
-                }
-            }
-        }
-        
-        echo json_encode(["ok" => true, "message" => "User deleted successfully"]);
-    } else {
-        mysqli_rollback($conn);
-        echo json_encode(["ok" => false, "error" => "User not found or could not be deleted"]);
+    if (($record['Role'] ?? 'customer') !== 'customer' && $record['Role'] !== null) {
+        json_response(['ok' => false, 'error' => 'Chức năng này chỉ được phép xóa tài khoản khách hàng.'], 403);
     }
-} catch (Exception $e) {
-    mysqli_rollback($conn);
-    echo json_encode(["ok" => false, "error" => $e->getMessage()]);
-}
 
-mysqli_close($conn);
-?>
+    // Commerce records are audit evidence. Never cascade-delete a customer who has orders.
+    $orders = $conn->prepare('SELECT COUNT(*) AS total FROM donhang WHERE ID_KhachHang = ?');
+    $orders->bind_param('i', $userId);
+    $orders->execute();
+    if ((int) $orders->get_result()->fetch_assoc()['total'] > 0) {
+        json_response([
+            'ok' => false,
+            'error' => 'Không thể xóa khách hàng đã có đơn hàng vì cần giữ lịch sử giao dịch và đối soát.',
+        ], 409);
+    }
+
+    $conn->begin_transaction();
+    $cleanup = [
+        ['chat_messages', 'user_id'],
+        ['chat_appointments', 'user_id'],
+        ['chat_logs', 'user_id'],
+        ['customer_analysis', 'user_id'],
+        ['customer_notifications', 'user_id'],
+        ['customer_weekly_stats', 'user_id'],
+        ['customer_score_snapshots', 'user_id'],
+        ['customer_scores_current', 'user_id'],
+        ['user_events', 'user_id'],
+        ['nap_tien', 'ID_KhachHang'],
+    ];
+    foreach ($cleanup as [$table, $column]) {
+        $statement = $conn->prepare("DELETE FROM `{$table}` WHERE `{$column}` = ?");
+        $statement->bind_param('i', $userId);
+        $statement->execute();
+    }
+
+    $delete = $conn->prepare("DELETE FROM khachhang WHERE ID_KhachHang = ? AND (Role = 'customer' OR Role IS NULL)");
+    $delete->bind_param('i', $userId);
+    $delete->execute();
+    if ($delete->affected_rows !== 1) {
+        throw new RuntimeException('Không thể xóa khách hàng.');
+    }
+    $conn->commit();
+
+    json_response(['ok' => true, 'message' => 'Đã xóa khách hàng chưa có giao dịch.']);
+} catch (Throwable $error) {
+    if ($conn->errno === 0 || $conn->sqlstate !== '00000') {
+        try {
+            $conn->rollback();
+        } catch (Throwable) {
+        }
+    }
+    error_log('Delete customer failed: ' . $error->getMessage());
+    json_response(['ok' => false, 'error' => app_is_production() ? 'Không thể xóa khách hàng.' : $error->getMessage()], 500);
+}

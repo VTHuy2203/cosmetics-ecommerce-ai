@@ -1,23 +1,17 @@
 <?php
-$data = array();
-if (isset($_FILES['upload']['name'])) {
-    $file_name = $_FILES['upload']['name'];
-    $file_path = '/TTTT/Image_upload/' . $file_name;
-    // $file_path = $_SERVER['DOCUMENT_ROOT'] . '/TTTT/Image_upload/' . $file_name;
+declare(strict_types=1);
 
-    $file_extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
-    if ($file_extension == 'jpg' || $file_extension == 'jpeg' || $file_extension == 'png') {
-        if (move_uploaded_file($_FILES['upload']['tmp_name'], $file_path)) {
-            $data['file'] = $file_name;
-            $data['url'] = $file_path;
-            $data['uploaded'] = 1;
-        } else {
-            $data['uploaded'] = 0;
-            $data['error']['message'] = 'Error! File not uploaded';
-        }
-    } else {
-        $data['uploaded'] = 0;
-        $data['error']['message'] = 'Invalid extension';
-    }
+require_once dirname(__DIR__, 3) . '/config/uploads.php';
+require_once '../Layouts/Admin_Access_Check.php';
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST' || !csrf_is_valid((string) ($_GET['csrf_token'] ?? ''))) {
+    json_response(['uploaded' => 0, 'error' => ['message' => 'Unauthorized upload.']], 403);
 }
-echo json_encode($data);
+
+try {
+    $fileName = store_public_image_upload($_FILES['upload'] ?? [], dirname(__DIR__, 3) . '/Image_upload');
+    json_response(['uploaded' => 1, 'fileName' => $fileName, 'url' => '/TTTT/Image_upload/' . rawurlencode($fileName)]);
+} catch (Throwable $error) {
+    error_log('Editor news upload failed: ' . $error->getMessage());
+    json_response(['uploaded' => 0, 'error' => ['message' => 'Invalid image.']], 422);
+}

@@ -31,8 +31,9 @@ if (!$result) {
 }
 
 //duyệt đơn hàng
-if(isset($_GET['oder_id']) && isset($_GET['prepare']))
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && ($_POST['action'] ?? '') === 'prepare')
 {
+    require_csrf();
     // CRITICAL: Double-check role before preparing (use ONLY admin session)
     $admin_role = $_SESSION['admin_role'] ?? null;
     $is_staff_via_admin = ($admin_role === 'employee');
@@ -43,10 +44,11 @@ if(isset($_GET['oder_id']) && isset($_GET['prepare']))
         header('Location: Prepare_Oders.php?error=unauthorized');
         exit();
     }
-    $oder_id = intval($_GET['oder_id']);
-    $sql_update_trangthai = "UPDATE `donhang` SET `TrangThai` = '2' WHERE `donhang`.`ID_DonHang` = '$oder_id';";
-
-    $result_update_trangthai = mysqli_query($conn, $sql_update_trangthai);
+    $oder_id = (int) ($_POST['order_id'] ?? 0);
+    $transition = $conn->prepare('UPDATE donhang SET TrangThai = 2 WHERE ID_DonHang = ? AND TrangThai = 1');
+    $transition->bind_param('i', $oder_id);
+    $transition->execute();
+    $result_update_trangthai = $transition->affected_rows === 1;
     
     if ($result_update_trangthai) {
         // Get order info for WebSocket notification
@@ -72,7 +74,7 @@ if(isset($_GET['oder_id']) && isset($_GET['prepare']))
         }
     }
 
-    if ($_GET['prepare'] == 'prepare') {
+    if (($_POST['return_to'] ?? '') !== 'all') {
         header('Location: Prepare_Oders.php');
         exit();
     } else {
@@ -130,9 +132,9 @@ if(isset($_GET['oder_id']) && isset($_GET['prepare']))
                                         while ($row = mysqli_fetch_array($result)) {
                                             echo '<tr>';
                                             echo ' <td>' . $stt . '</td>';
-                                            echo ' <td class="text-center"> <a href="Prepare_Oders.php?oder_id='.$row['ID_DonHang'].'&prepare=prepare" class="btn btn-info">Chuẩn Bị</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_order_transition_form((int) $row['ID_DonHang'], 'prepare', 'Chuẩn bị', 'btn-info', 'prepare') . '</td>';
                                             echo ' <td class="text-center"> <a href="View_Oder_Detail.php?oder_id='.$row['ID_DonHang'].'&view=prepare" class="btn btn-primary">Xem Chi Tiết</a>' . '</td>';
-                                            echo ' <td class="text-center"> <a href="Delete_Oder.php?del_oder_id='.$row['ID_DonHang'].'&view=prepare" class="btn btn-danger">Hủy</a>' . '</td>';
+                                            echo '<td class="text-center">' . admin_cancel_order_form((int) $row['ID_DonHang'], 'prepare') . '</td>';
                                             echo ' <td>' . $row['HoVaTen'] . '</td>';
                                             echo ' <td>' . $row['SDT'] . '</td>';
                                             echo ' <td>' . $row['GhiChu'] . '</td>';
